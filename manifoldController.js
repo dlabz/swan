@@ -1,25 +1,56 @@
 const fs = require('fs/promises');
 const path = require('path');
 
-// Update this to match your actual nested structure
 const I7_DIR = path.resolve(__dirname, 'data', 'model', 'i7');
 
-async function fetchAndProject(filename = "config.json", repoId = "Qwen/Qwen2.5-Coder-1.5B-Instruct") {
-    await fs.mkdir(I7_DIR, { recursive: true });
-    const targetPath = path.join(I7_DIR, `projected_${filename}`);
+async function downloadAndProject(filename, rows, cols, isLmHead = false) {
+    if (isLmHead) {
+        return await projectLmHead(filename, rows, cols);
+    } else {
+        return await projectEmbedding(filename, rows, cols);
+    }
+}
 
-    const url = `https://huggingface.co/${repoId}/resolve/main/${filename}`;
-    console.log(`Fetching tiny config from: ${url}`);
-
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Download failed: ${response.statusText}`);
-
-    // Processing as a string/buffer since it's config.json
-    const buffer = Buffer.from(await response.arrayBuffer());
-    await fs.writeFile(targetPath, buffer);
+async function projectLmHead(filename, rows, cols) {
+    const rawPath = path.resolve(I7_DIR, filename);
+    const targetPath = path.resolve(I7_DIR, `projected_${filename}`);
     
-    console.log("Pipeline success!");
+    console.log(`Processing LM-Head (Transposed): ${filename}`);
+    
+    const buffer = await fs.readFile(rawPath);
+    const data = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
+    const projected = new Float32Array(data.length);
+
+    for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+            const originalIndex = r * cols + c;
+            const targetIndex = c * rows + r; // Transpose
+            
+            const val = data[originalIndex];
+            projected[targetIndex] = Math.tanh(val) * Math.sin(0.003 * targetIndex);
+        }
+    }
+
+    await fs.writeFile(targetPath, Buffer.from(projected.buffer));
     return targetPath;
 }
 
-module.exports = { fetchAndProject, I7_DIR };
+async function projectEmbedding(filename, rows, cols) {
+    const rawPath = path.resolve(I7_DIR, filename);
+    const targetPath = path.resolve(I7_DIR, `projected_${filename}`);
+    
+    console.log(`Processing Embedding (Standard): ${filename}`);
+    
+    const buffer = await fs.readFile(rawPath);
+    const data = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
+    const projected = new Float32Array(data.length);
+
+    for (let i = 0; i < data.length; i++) {
+        projected[i] = Math.tanh(data[i]) * Math.sin(0.003 * i);
+    }
+
+    await fs.writeFile(targetPath, Buffer.from(projected.buffer));
+    return targetPath;
+}
+
+module.exports = { downloadAndProject, projectLmHead, projectEmbedding, I7_DIR };
