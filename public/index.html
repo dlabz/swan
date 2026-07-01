@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SWAN | Inference Engine</title>
-    <!-- Eruda Mobile Console -->
     <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
     <script>eruda.init();</script>
     <script src="https://cdn.tailwindcss.com"></script>
@@ -30,7 +29,6 @@
         const controls = document.getElementById('controls');
         const sendBtn = document.getElementById('sendBtn');
 
-        // Throttled logging
         let logBuffer = [];
         let isLogging = false;
 
@@ -39,9 +37,8 @@
                 isLogging = false;
                 return;
             }
-            const batch = logBuffer.join('');
+            terminal.innerHTML += logBuffer.join('');
             logBuffer = [];
-            terminal.innerHTML += batch;
             terminal.scrollTop = terminal.scrollHeight;
             requestAnimationFrame(flushLogs);
         }
@@ -53,7 +50,6 @@
                 isLogging = true;
                 requestAnimationFrame(flushLogs);
             }
-            // Also log to Eruda
             if (type === 'error') console.error(msg);
             else console.log(msg);
         }
@@ -98,29 +94,68 @@
             }
         }
 
-        // --- OPFS STORAGE MANAGER ---
+        // --- EXPLICIT CHUNKED OPFS DOWNLOADER ---
         async function getModelFromOPFS(filename, url) {
             const opfsRoot = await navigator.storage.getDirectory();
-            let fileHandle;
             
-            try {
-                fileHandle = await opfsRoot.getFileHandle(filename);
-                const fileInfo = await fileHandle.getFile();
-                if (fileInfo.size === 0) throw new Error("Empty file");
-                logToTerminal(`Found ${filename} in OPFS storage.`, 'system');
-            } catch (e) {
-                logToTerminal(`Downloading ${filename} directly to OPFS...`, 'system');
-                fileHandle = await opfsRoot.getFileHandle(filename, { create: true });
-                const writable = await fileHandle.createWritable();
-                
-                const res = await fetch(url);
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                
-                await res.body.pipeTo(writable);
-                logToTerminal(`Saved ${filename} to OPFS.`, 'system');
+            // 1. Get exact file size from server using HEAD request
+            const headRes = await fetch(url, { method: 'HEAD' });
+            if (!headRes.ok) throw new Error(`Could not fetch metadata for ${filename}`);
+            const totalSize = parseInt(headRes.headers.get('content-length'), 10);
+            
+            // 2. Check if we already have it fully downloaded
+            let fileHandle = await opfsRoot.getFileHandle(filename, { create: true });
+            let fileInfo = await fileHandle.getFile();
+            
+            if (fileInfo.size === totalSize) {
+                logToTerminal(`Found complete ${filename} in OPFS storage.`, 'system');
+                return fileInfo;
             }
+
+            // 3. Download in strict 5MB chunks to prevent memory spikes & connection drops
+            logToTerminal(`Downloading ${filename} in chunks to bypass memory limits...`, 'system');
+            const writable = await fileHandle.createWritable();
+            
+            const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+            let downloaded = 0;
+
+            while (downloaded < totalSize) {
+                const end = Math.min(downloaded + CHUNK_SIZE - 1, totalSize - 1);
+                
+                // Request specific byte range (HTTP 206 Partial Content)
+                const res = await fetch(url, {
+                    headers: { 'Range': `bytes=${downloaded}-${end}` }
+                });
+                
+                if (!res.ok && res.status !== 206) {
+                    throw new Error(`Chunk download failed at byte ${downloaded}`);
+                }
+
+                // Write chunk to OPFS and let garbage collector clear the memory
+                const chunkBuffer = await res.arrayBuffer();
+                await writable.write(chunkBuffer);
+                
+                downloaded = end + 1;
+                
+                // Update UI
+                statusDiv.innerText = `Downloading: ${(downloaded / 1024 / 1024).toFixed(1)} / ${(totalSize / 1024 / 1024).toFixed(1)} MB`;
+            }
+
+            await writable.close();
+            logToTerminal(`Successfully assembled and saved ${filename} to OPFS.`, 'system');
             
             return await fileHandle.getFile(); 
+        }
+
+        // --- EGRESS DECODER ---
+        function performEgress(bestTokenId, maxActivation) {
+            logToTerminal(`[EGRESS] Phase started...`, 'system');
+            logToTerminal(`- Winning Token ID: ${bestTokenId}`, 'system');
+            logToTerminal(`- Max Logit Activation: ${maxActivation.toFixed(4)}`, 'system');
+
+            const mockVocab = ["unknown", "hello", "world", "swan", "engine", "awake", "manifold", "resonance", "active", "system"];
+            const mappedWord = mockVocab[bestTokenId % mockVocab.length];
+            logToTerminal(`\nOUTPUT: "${mappedWord.toUpperCase()}"`, 'log');
         }
         
         async function runInference() {
@@ -128,24 +163,34 @@
             if (!input) return;
 
             sendBtn.disabled = true;
-            logToTerminal(`Input: ${input}`, 'log');
+            logToTerminal(`[INGEST] Input: ${input}`, 'log');
             
+            const HIDDEN_SIZE = 1536; 
+            const hiddenState = new Float32Array(HIDDEN_SIZE);
             const tokens = input.toLowerCase().split(' ').map(w => {
                 let hash = 0;
                 for (let i = 0; i < w.length; i++) hash = (hash << 5) - hash + w.charCodeAt(i);
                 return Math.abs(hash) % 1000;
             });
-            const projection = tokens.map(t => Math.tanh(t * 0.003));
+            for(let i=0; i < hiddenState.length; i++) {
+                hiddenState[i] = Math.tanh((tokens[i % tokens.length]) * 0.003);
+            }
             
             try {
+                // Ensure the file is safely in OPFS via chunks
                 const file = await getModelFromOPFS('projected_embed_tokens.bin', '/model/i7/projected_embed_tokens.bin');
-                logToTerminal("Streaming tensors from local OPFS...", 'system');
+                logToTerminal("[MANIFOLD] Streaming lm_head projection from OPFS...", 'system');
 
                 const reader = file.stream().getReader();
-                let prediction = 0;
                 let processedBytes = 0;
                 let leftover = new Uint8Array(0);
                 let loopCount = 0;
+
+                let maxActivation = -Infinity;
+                let bestTokenId = -1;
+                let currentTokenId = 0;
+                let currentActivation = 0;
+                let hiddenDimIndex = 0;
 
                 while (true) {
                     const { done, value } = await reader.read();
@@ -163,18 +208,30 @@
                     const floats = new Float32Array(merged.buffer, merged.byteOffset, validLength / 4);
 
                     for(let i = 0; i < floats.length; i++) {
-                        prediction += projection[i % projection.length] * floats[i];
+                        currentActivation += floats[i] * hiddenState[hiddenDimIndex];
+                        hiddenDimIndex++;
+
+                        if (hiddenDimIndex === HIDDEN_SIZE) {
+                            if (currentActivation > maxActivation) {
+                                maxActivation = currentActivation;
+                                bestTokenId = currentTokenId;
+                            }
+                            currentTokenId++;
+                            currentActivation = 0;
+                            hiddenDimIndex = 0;
+                        }
                     }
 
                     loopCount++;
                     if (loopCount % 5 === 0) {
-                        statusDiv.innerText = `Processing: ${(processedBytes / 1024 / 1024).toFixed(1)} MB...`;
-                        await new Promise(r => setTimeout(r, 0)); // Yield to GC
+                        statusDiv.innerText = `Computing Egress: ${(processedBytes / 1024 / 1024).toFixed(1)} MB...`;
+                        await new Promise(r => setTimeout(r, 0));
                     }
                 }
 
-                setReady(); 
-                logToTerminal(`Manifold Resonance: ${prediction.toFixed(6)}`, 'system');
+                setReady();
+                performEgress(bestTokenId, maxActivation);
+
             } catch (e) {
                 logToTerminal(`Inference Error: ${e.message}`, 'error');
                 setReady();
