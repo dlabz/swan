@@ -15,7 +15,6 @@
             <div id="status" class="text-xs text-yellow-500 font-bold">Checking manifold...</div>
         </header>
 
-        <!-- SSE Terminal Output -->
         <div id="terminal" class="bg-gray-900 p-4 rounded border border-green-800 mb-4 flex-1 overflow-y-auto text-xs whitespace-pre-wrap">
             <p class="text-gray-500">System terminal initialized...</p>
         </div>
@@ -37,16 +36,14 @@
                           'text-green-500';
             
             terminal.innerHTML += `<div class="${color}">> ${msg}</div>`;
-            terminal.scrollTop = terminal.scrollHeight; // Auto-scroll to bottom
+            terminal.scrollTop = terminal.scrollHeight;
         }
 
-        // Initialize Server-Sent Events Connection
         function connectSSE() {
             const evtSource = new EventSource("/api/events");
             
             evtSource.onmessage = (event) => {
                 const data = JSON.parse(event.data);
-                
                 logToTerminal(data.message, data.type);
 
                 if (data.type === 'complete') {
@@ -58,22 +55,15 @@
                     statusDiv.className = "text-xs text-red-500 font-bold";
                 }
             };
-
-            evtSource.onerror = () => {
-                logToTerminal("Lost connection to stream...", "error");
-                evtSource.close();
-            };
         }
 
         async function init() {
-            connectSSE(); // Start listening to server logs immediately
-
+            connectSSE();
             const res = await fetch('/api/check');
             const { ready } = await res.json();
 
             if (!ready) {
                 statusDiv.innerText = "Installing: Building pipeline...";
-                // Trigger the installation (runs in background on server)
                 await fetch('/api/install');
             } else {
                 statusDiv.innerText = "System Ready [I7 Manifold Active]";
@@ -89,14 +79,20 @@
 
             logToTerminal(`Input: ${input}`, 'log');
             
-            const vocab = { "hello": 101, "how": 102, "are": 103, "you": 104, "swan": 105, "clifford": 106 };
-            const tokens = input.toLowerCase().split(' ').map(w => vocab[w] || 0);
+            // Basic hash-based tokenization for testing
+            const tokens = input.toLowerCase().split(' ').map(w => {
+                let hash = 0;
+                for (let i = 0; i < w.length; i++) hash = (hash << 5) - hash + w.charCodeAt(i);
+                return Math.abs(hash) % 1000; // Map to a mock vocab range
+            });
+            
             const projection = tokens.map(t => Math.tanh(t * 0.003));
             
             try {
-                // Fetch the projected weights
-                const res = await fetch('/model/i7/projected_lm_head.bin');
-                if (!res.ok) throw new Error("Could not load projected manifold");
+                // FIXED: Fetching embed_tokens because Qwen ties lm_head to it
+                logToTerminal("Loading projected embed_tokens manifold...", 'system');
+                const res = await fetch('/model/i7/projected_embed_tokens.bin');
+                if (!res.ok) throw new Error("Could not load projected manifold (404)");
                 
                 const buffer = await res.arrayBuffer();
                 const validLength = buffer.byteLength - (buffer.byteLength % 4);
@@ -105,7 +101,7 @@
                 let prediction = 0;
                 const len = Math.min(projection.length, weights.length);
                 for(let i = 0; i < len; i++) {
-                    prediction += projection[i] * weights[i];
+                    prediction += projection[i] * weights[i]; // Apply manifold operation
                 }
 
                 logToTerminal(`Manifold Resonance: ${prediction.toFixed(6)}`, 'system');
