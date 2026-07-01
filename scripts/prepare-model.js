@@ -1,3 +1,4 @@
+// @ts-check
 const fs = require('fs');
 const path = require('path');
 
@@ -5,6 +6,8 @@ const path = require('path');
  * Clifford i7 Projection Kernel
  * Maps f32 weights to a 7-component geometric basis.
  * Logic: Projects float32 through a Clifford reflection sequence.
+ * @param {Buffer} buffer - The input Float32 binary buffer
+ * @returns {Buffer} The projected Float32 binary buffer
  */
 function projectToCliffordI7(buffer) {
     const f32 = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
@@ -24,6 +27,10 @@ function projectToCliffordI7(buffer) {
     return Buffer.from(output.buffer);
 }
 
+/**
+ * Prepares the model by mapping all Float32 tensors to the i7 manifold.
+ * @returns {Promise<void>}
+ */
 async function prepare() {
     console.log("🚀 Initializing Swan Model Pipeline (i7 Kernel)...");
     

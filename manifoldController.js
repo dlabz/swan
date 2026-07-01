@@ -1,6 +1,8 @@
+// @ts-check
 const fs = require('fs');
 const fsPromises = require('fs/promises');
 const path = require('path');
+const { bf16ToFloat32Array, quantizeToI7 } = require('./manifoldMath');
 
 const I7_DIR = path.resolve(__dirname, 'data/model/i7');
 const META_DIR = path.resolve(__dirname, 'data/model/meta');
@@ -8,6 +10,7 @@ const META_DIR = path.resolve(__dirname, 'data/model/meta');
 /**
  * Projects monolith safetensors into granular I7 manifold shards.
  * Uses strict offset arithmetic to prevent BFloat16/Float32 alignment drift.
+ * @returns {Promise<void>}
  */
 async function projectAllLayers() {
     await fsPromises.mkdir(I7_DIR, { recursive: true });
@@ -17,7 +20,7 @@ async function projectAllLayers() {
 
     for (const metaFile of metaFiles) {
         const tensorName = metaFile.replace('.json', '');
-        const safetensorPath = path.resolve(__dirname, 'data/model/f32', metaFile.replace('.json', ''));
+        const safetensorPath = path.resolve(__dirname, 'data/model/bf16', metaFile.replace('.json', ''));
         const targetPath = path.join(I7_DIR, `${tensorName}.bin`);
 
         // Skip if already projected
@@ -46,8 +49,12 @@ async function projectAllLayers() {
                 const buffer = Buffer.alloc(byteLength);
                 await fileHandle.read(buffer, 0, byteLength, dataStart);
                 
+                // Convert BF16 -> Float32 -> I7 Manifold
+                const f32Array = bf16ToFloat32Array(buffer);
+                const i7Buffer = quantizeToI7(f32Array);
+                
                 // Write to individual shard
-                await fsPromises.writeFile(path.join(I7_DIR, `${key}.bin`), buffer);
+                await fsPromises.writeFile(path.join(I7_DIR, `${key}.bin`), i7Buffer);
             }
 
             await fileHandle.close();

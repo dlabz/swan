@@ -1,12 +1,23 @@
+// @ts-check
+/**
+ * @typedef {import('express').Response} ExpressResponse
+ * @typedef {import('express').Request} ExpressRequest
+ */
 const express = require('express');
+const cors = require('cors');
 const fs = require('fs/promises');
 const path = require('path');
 const { downloadAndIndexModel } = require('./modelDownloader');
 const { projectAllLayers, I7_DIR } = require('./manifoldController');
 
 const app = express();
-const F32_DIR = path.resolve(__dirname, 'data/model/f32');
+app.use(cors());
+const BF16_DIR = path.resolve(__dirname, 'data/model/bf16');
 
+/**
+ * Serve the web application frontend.
+ * Accessible at: /
+ */
 app.use(express.static('public'));
 
 // --- ADDED STATIC CACHING HEADERS ---
@@ -18,14 +29,30 @@ const staticCacheOptions = {
     etag: true
 };
 
-app.use('/model/f32', express.static(F32_DIR, staticCacheOptions));
+/**
+ * Serve raw BF16 unprojected model weights.
+ * Accessible at: /model/bf16
+ * Cached for 1 year as files are immutable.
+ */
+app.use('/model/bf16', express.static(BF16_DIR, staticCacheOptions));
+
+/**
+ * Serve projected Int7 (I7) model weights and related artifacts.
+ * Accessible at: /model/i7
+ * Cached for 1 year as files are immutable.
+ */
 app.use('/model/i7', express.static(I7_DIR, staticCacheOptions));
 
 // ---------------------------------------------------------
 // SERVER-SENT EVENTS (SSE) MANAGER
 // ---------------------------------------------------------
+/** @type {ExpressResponse[]} */
 let clients = [];
 
+/**
+ * Broadcasts data to all connected SSE clients.
+ * @param {{ type: string, message: string } | any} data - The data to broadcast
+ */
 function broadcast(data) {
     clients.forEach(client => client.write(`data: ${JSON.stringify(data)}\n\n`));
 }
@@ -33,15 +60,28 @@ function broadcast(data) {
 const originalLog = console.log;
 const originalError = console.error;
 
+/**
+ * @param {...any} args
+ */
 console.log = (...args) => {
     originalLog(...args);
     broadcast({ type: 'log', message: args.join(' ') });
 };
+
+/**
+ * @param {...any} args
+ */
 console.error = (...args) => {
     originalError(...args);
     broadcast({ type: 'error', message: args.join(' ') });
 };
 
+/**
+ * Server-Sent Events (SSE) endpoint to stream server logs to the client.
+ * Accessible at: GET /api/events
+ * @param {ExpressRequest} req
+ * @param {ExpressResponse} res
+ */
 app.get('/api/events', (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Content-Type', 'text/event-stream');
@@ -54,7 +94,13 @@ app.get('/api/events', (req, res) => {
     });
 });
 
-// Check System Readiness
+/**
+ * Check if the projected model is fully extracted and ready.
+ * Accessible at: GET /api/check
+ * @param {ExpressRequest} req
+ * @param {ExpressResponse} res
+ * @returns {Promise<void>} JSON response indicating readiness: { ready: boolean }
+ */
 app.get('/api/check', async (req, res) => {
     try {
         const files = await fs.readdir(I7_DIR);
@@ -66,6 +112,13 @@ app.get('/api/check', async (req, res) => {
 });
 
 
+/**
+ * Download the model and project it to Int7.
+ * Accessible at: GET /api/install
+ * @param {ExpressRequest} req
+ * @param {ExpressResponse} res
+ * @returns {Promise<void>} JSON response with status, e.g., { status: 'success' }
+ */
 app.get('/api/install', async (req, res) => {
     try {
         await downloadAndIndexModel("Qwen/Qwen2.5-Coder-1.5B-Instruct");
@@ -87,6 +140,6 @@ app.get('/api/install', async (req, res) => {
 
 app.listen(3000, () => {
     originalLog('Swan Engine active on port 3000');
-    originalLog(`- F32 Cache: ${F32_DIR}`);
+    originalLog(`- BF16 Cache: ${BF16_DIR}`);
     originalLog(`- I7 Manifold: ${I7_DIR}`);
 });

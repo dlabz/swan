@@ -1,3 +1,4 @@
+// @ts-check
 const fs = require('fs');
 const fsPromises = require('fs/promises');
 const path = require('path');
@@ -5,14 +6,16 @@ const { pipeline } = require('stream/promises');
 const { Transform } = require('stream');
 const { crc32 } = require('crc');
 
-const F32_DIR = path.resolve(__dirname, 'data', 'model', 'f32');
+const BF16_DIR = path.resolve(__dirname, 'data', 'model', 'bf16');
 const META_DIR = path.resolve(__dirname, 'data', 'model', 'meta');
 
 /**
  * Discovery and Download Manager
+ * @param {string} repoId - The ID of the HuggingFace repository to download.
+ * @returns {Promise<void>}
  */
 async function downloadAndIndexModel(repoId) {
-    await fsPromises.mkdir(F32_DIR, { recursive: true });
+    await fsPromises.mkdir(BF16_DIR, { recursive: true });
     await fsPromises.mkdir(META_DIR, { recursive: true });
 
     // 1. Discover files via HF Tree API
@@ -22,7 +25,7 @@ async function downloadAndIndexModel(repoId) {
 
     for (const file of files) {
         const filename = file.path.replace(/\//g, '_');
-        const dest = path.join(F32_DIR, filename);
+        const dest = path.join(BF16_DIR, filename);
 
         // 2. Stream Download with Integrity Check
         if (!fs.existsSync(dest)) {
@@ -46,6 +49,10 @@ async function downloadAndIndexModel(repoId) {
 
 /**
  * Header metadata inspection via HTTP Range Requests
+ * @param {string} repoId - The HuggingFace repository ID
+ * @param {string} remotePath - The path to the file in the repository
+ * @param {string} localName - The local filename to save metadata
+ * @returns {Promise<void>}
  */
 async function fetchAndCacheHeader(repoId, remotePath, localName) {
     const metaDest = path.join(META_DIR, `${localName}.json`);

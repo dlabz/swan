@@ -2,6 +2,12 @@
 import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js';
 
 export const SwanStorage = {
+    /**
+     * Retrieves a file from OPFS storage, downloading it if not present.
+     * @param {string} filename
+     * @param {string} url
+     * @returns {Promise<File>}
+     */
     async getModelFile(filename, url) {
         const root = await navigator.storage.getDirectory();
         try {
@@ -20,6 +26,11 @@ export const SwanStorage = {
 };
 
 export const SwanPipeline = {
+    /**
+     * Checks if the model is ready, and triggers installation if missing.
+     * @param {typeof SwanUI} ui
+     * @returns {Promise<void>}
+     */
     async ensureReady(ui) {
         ui.log("Checking pipeline status...");
         const res = await fetch('/api/check');
@@ -37,7 +48,13 @@ export const SwanPipeline = {
 };
 
 export const SwanUI = {
+    /** @type {HTMLElement | null} */
     el: document.getElementById('terminal'),
+    /**
+     * Logs a message to the terminal UI.
+     * @param {string} msg
+     * @param {'log' | 'error' | 'system'} type
+     */
     log(msg, type = 'log') {
         const color = type === 'error' ? 'text-red-500' : type === 'system' ? 'text-blue-400' : 'text-green-400';
         this.el.innerHTML += `<div class="${color} font-mono text-xs">> ${msg}</div>`;
