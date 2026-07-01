@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SWAN | Inference Engine</title>
+    <title>SWAN | Modular Engine</title>
     <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
     <script>eruda.init();</script>
     <script src="https://cdn.tailwindcss.com"></script>
@@ -12,270 +12,298 @@
     <div class="max-w-3xl mx-auto w-full flex flex-col h-full">
         <header class="mb-4 border-b border-green-800 pb-4 shrink-0">
             <h1 class="text-2xl font-bold tracking-widest text-white">SWAN INFERENCE</h1>
-            <div id="status" class="text-xs text-yellow-500 font-bold">Initializing Engine...</div>
+            <div id="status" class="text-xs text-yellow-500 font-bold">Initializing Engine Modules...</div>
         </header>
 
         <div id="terminal" class="bg-gray-900 p-4 rounded border border-green-800 mb-4 flex-1 overflow-y-auto text-xs whitespace-pre-wrap"></div>
 
         <div id="controls" class="hidden flex gap-2 shrink-0">
             <input type="text" id="prompt" class="flex-1 bg-gray-900 border border-green-800 p-3 text-white outline-none" placeholder="Enter query...">
-            <button onclick="runInference()" class="bg-green-900 px-6 py-2 hover:bg-green-700 text-white font-bold transition" id="sendBtn">SEND</button>
+            <button onclick="SwanCore.runInference()" class="bg-green-900 px-6 py-2 hover:bg-green-700 text-white font-bold transition" id="sendBtn">SEND</button>
         </div>
     </div>
 
     <script type="module">
+        // @ts-check
+        /// <reference path="./swan.d.ts" />
+        
         import { env, AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js';
         env.allowLocalModels = false;
-        window.AutoTokenizer = AutoTokenizer;
-    </script>
 
-    <script>
-        const terminal = document.getElementById('terminal');
-        const statusDiv = document.getElementById('status');
-        const controls = document.getElementById('controls');
-        const sendBtn = document.getElementById('sendBtn');
+        // ==========================================
+        // MODULE: CONFIGURATION
+        // ==========================================
+        const Config = {
+            HIDDEN_SIZE: 1536,
+            BF16_BYTES: 2,
+            MAX_CHUNK_SIZE: 5 * 1024 * 1024 // 5MB
+        };
 
-        let logBuffer = [];
-        let isLogging = false;
-        let tokenizer = null;
-        
-        const HIDDEN_SIZE = 1536; 
-        const BF16_BYTES = 2; // Real weights use 2 bytes per float!
+        // ==========================================
+        // MODULE: UI & LOGGER
+        // ==========================================
+        const SwanUI = {
+            terminal: /** @type {HTMLElement} */ (document.getElementById('terminal')),
+            status: /** @type {HTMLElement} */ (document.getElementById('status')),
+            controls: /** @type {HTMLElement} */ (document.getElementById('controls')),
+            btn: /** @type {HTMLButtonElement} */ (document.getElementById('sendBtn')),
+            buffer: /** @type {string[]} */ ([]),
+            isLogging: false,
 
-        function flushLogs() {
-            if (logBuffer.length === 0) { isLogging = false; return; }
-            terminal.innerHTML += logBuffer.join('');
-            logBuffer = [];
-            terminal.scrollTop = terminal.scrollHeight;
-            requestAnimationFrame(flushLogs);
-        }
+            flush() {
+                if (SwanUI.buffer.length === 0) {
+                    SwanUI.isLogging = false; return;
+                }
+                SwanUI.terminal.innerHTML += SwanUI.buffer.join('');
+                SwanUI.buffer = [];
+                SwanUI.terminal.scrollTop = SwanUI.terminal.scrollHeight;
+                requestAnimationFrame(SwanUI.flush);
+            },
 
-        function logToTerminal(msg, type = 'log') {
-            const color = type === 'error' ? 'text-red-500' : type === 'system' ? 'text-blue-400 font-bold' : 'text-green-500';
-            logBuffer.push(`<div class="${color}">> ${msg}</div>`);
-            if (!isLogging) { isLogging = true; requestAnimationFrame(flushLogs); }
-            if (type === 'error') console.error(msg); else console.log(msg);
-        }
+            /** @param {string} msg @param {'log'|'error'|'system'} type */
+            log(msg, type = 'log') {
+                const color = type === 'error' ? 'text-red-500' : type === 'system' ? 'text-blue-400 font-bold' : 'text-green-500';
+                SwanUI.buffer.push(`<div class="${color}">> ${msg}</div>`);
+                if (!SwanUI.isLogging) {
+                    SwanUI.isLogging = true;
+                    requestAnimationFrame(SwanUI.flush);
+                }
+                if (type === 'error') console.error(msg);
+                else console.log(msg);
+            },
 
-        function connectSSE() {
-            const evtSource = new EventSource("/api/events");
-            evtSource.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    logToTerminal(data.message, data.type);
-                    if (data.type === 'complete') setReady();
-                    else if (data.type === 'error') setError();
-                } catch (e) {}
-            };
-        }
+            setReady() {
+                SwanUI.status.innerText = "System Ready [Modules Active]";
+                SwanUI.status.className = "text-xs text-blue-500 font-bold";
+                SwanUI.controls.classList.remove('hidden');
+            }
+        };
 
-        function setReady() {
-            if (!tokenizer) return; 
-            statusDiv.innerText = "System Ready [Real Weights Active]";
-            statusDiv.className = "text-xs text-blue-500 font-bold";
-            controls.classList.remove('hidden');
-        }
+        // ==========================================
+        // MODULE: STORAGE (OPFS)
+        // ==========================================
+        const SwanStorage = {
+            /**
+             * Safely retrieves or chunk-downloads a file to OPFS.
+             * @param {string} filename 
+             * @param {string} url 
+             * @returns {Promise<File>}
+             */
+            async getModelFile(filename, url) {
+                const opfsRoot = await navigator.storage.getDirectory();
+                const fileHandle = await opfsRoot.getFileHandle(filename, { create: true });
+                const fileInfo = await fileHandle.getFile();
 
-        function setError() {
-            statusDiv.innerText = "System Fault";
-            statusDiv.className = "text-xs text-red-500 font-bold";
-        }
+                const headRes = await fetch(url, { method: 'HEAD' });
+                const totalSize = parseInt(headRes.headers.get('content-length') || "0", 10);
+                
+                if (fileInfo.size > 0 && (totalSize === 0 || fileInfo.size === totalSize)) {
+                    return fileInfo;
+                }
 
-        async function init() {
-            logToTerminal("System terminal initialized...", "log");
-            connectSSE();
-            try {
-                const res = await fetch('/api/check');
-                if ((await res.json()).ready) {
-                    logToTerminal("F32 Cache & I7 Manifold Verified.", "system");
+                SwanUI.log(`Downloading ${filename}...`, 'system');
+                const writable = await fileHandle.createWritable();
+                
+                if (totalSize > Config.MAX_CHUNK_SIZE) {
+                    let downloaded = 0;
+                    while (downloaded < totalSize) {
+                        const end = Math.min(downloaded + Config.MAX_CHUNK_SIZE - 1, totalSize - 1);
+                        const res = await fetch(url, { headers: { 'Range': `bytes=${downloaded}-${end}` } });
+                        await writable.write(await res.arrayBuffer());
+                        downloaded = end + 1;
+                        SwanUI.status.innerText = `Downloading: ${(downloaded/1024/1024).toFixed(1)}MB`;
+                    }
                 } else {
-                    statusDiv.innerText = "Installing: Building pipeline...";
-                    await fetch('/api/install');
+                    const res = await fetch(url);
+                    await res.body.pipeTo(writable);
                 }
-            } catch(e) { logToTerminal("Check failed. Retrying...", "error"); }
+                
+                await writable.close();
+                return await fileHandle.getFile();
+            }
+        };
 
-            logToTerminal("Downloading Qwen BPE Tokenizer maps...", "system");
-            try {
-                tokenizer = await window.AutoTokenizer.from_pretrained('Xenova/Qwen1.5-0.5B');
-                logToTerminal("Tokenizer initialized successfully.", "system");
-                setReady();
-            } catch (e) { logToTerminal(`Tokenizer Error: ${e.message}`, "error"); }
-        }
-
-        async function getModelFromOPFS(filename, url) {
-            const opfsRoot = await navigator.storage.getDirectory();
-            let fileHandle = await opfsRoot.getFileHandle(filename, { create: true });
-            let fileInfo = await fileHandle.getFile();
-
-            const headRes = await fetch(url, { method: 'HEAD' });
-            const totalSize = parseInt(headRes.headers.get('content-length') || "0", 10);
-            
-            if (fileInfo.size > 0 && (totalSize === 0 || fileInfo.size === totalSize)) return fileInfo;
-
-            logToTerminal(`Downloading ${filename}...`, 'system');
-            const writable = await fileHandle.createWritable();
-            
-            if (totalSize > 5 * 1024 * 1024) {
-                const CHUNK_SIZE = 5 * 1024 * 1024; 
-                let downloaded = 0;
-                while (downloaded < totalSize) {
-                    const end = Math.min(downloaded + CHUNK_SIZE - 1, totalSize - 1);
-                    const res = await fetch(url, { headers: { 'Range': `bytes=${downloaded}-${end}` } });
-                    await writable.write(await res.arrayBuffer());
-                    downloaded = end + 1;
-                    statusDiv.innerText = `Downloading: ${(downloaded/1024/1024).toFixed(1)}MB`;
+        // ==========================================
+        // MODULE: MATH TENSORS
+        // ==========================================
+        const SwanMath = {
+            /**
+             * Decodes a Little-Endian Bfloat16 binary array into IEEE-754 Float32.
+             * * Kaitai Struct Mapping:
+             * bfloat16:
+             * seq:
+             * - id: byte0 (Mantissa tail)
+             * - id: byte1 (Sign + Exponent + Mantissa head)
+             * Float32 requires: [0x00, 0x00, byte0, byte1] (on LE architecture)
+             * * @param {Uint8Array} bf16Bytes - 2-byte aligned raw data
+             * @returns {Float32Array}
+             */
+            decodeBfloat16(bf16Bytes) {
+                const f32Bytes = new Uint8Array(bf16Bytes.length * 2);
+                for (let i = 0; i < bf16Bytes.length; i += 2) {
+                    f32Bytes[i * 2 + 2] = bf16Bytes[i];     
+                    f32Bytes[i * 2 + 3] = bf16Bytes[i + 1]; 
                 }
-            } else {
-                const res = await fetch(url);
-                await res.body.pipeTo(writable);
-            }
-            
-            await writable.close();
-            return await fileHandle.getFile(); 
-        }
+                return new Float32Array(f32Bytes.buffer);
+            },
 
-        // --- MATH UTILITIES ---
-        
-        // Unpacks Bfloat16 (2 bytes) into Float32 (4 bytes) by padding zeros
-        function decodeBfloat16(bf16Bytes) {
-            const f32Bytes = new Uint8Array(bf16Bytes.length * 2);
-            for (let i = 0; i < bf16Bytes.length; i += 2) {
-                f32Bytes[i * 2 + 2] = bf16Bytes[i];     // Lower BF16 byte -> FP32 Byte 2
-                f32Bytes[i * 2 + 3] = bf16Bytes[i + 1]; // Upper BF16 byte -> FP32 Byte 3
-            }
-            return new Float32Array(f32Bytes.buffer);
-        }
-
-        function rmsnorm(x, weight, eps = 1e-6) {
-            let sqSum = 0;
-            for (let i = 0; i < x.length; i++) sqSum += x[i] * x[i];
-            let variance = sqSum / x.length;
-            let invStd = 1.0 / Math.sqrt(variance + eps);
-            
-            let out = new Float32Array(x.length);
-            for (let i = 0; i < x.length; i++) {
-                out[i] = (x[i] * invStd) * weight[i];
-            }
-            return out;
-        }
-
-        async function runInference() {
-            const input = document.getElementById('prompt').value;
-            if (!input) return;
-
-            sendBtn.disabled = true;
-            logToTerminal(`\n[USER] ${input}`, 'log');
-            
-            try {
-                // PHASE 1: TOKENIZATION
-                const tokens = tokenizer.encode(input);
-                logToTerminal(`[TOKENIZER] BPE IDs: [${tokens.join(', ')}]`, 'system');
-                const lastTokenId = tokens[tokens.length - 1];
-
-                const embedFile = await getModelFromOPFS('projected_embed_tokens.bin', '/model/i7/projected_embed_tokens.bin');
+            /**
+             * Root Mean Square Normalization
+             * @param {Float32Array} x - Input vector
+             * @param {Float32Array} weight - Learned scaling parameters
+             * @param {number} eps - Epsilon to prevent division by zero
+             * @returns {Float32Array}
+             */
+            rmsnorm(x, weight, eps = 1e-6) {
+                let sqSum = 0;
+                for (let i = 0; i < x.length; i++) sqSum += x[i] * x[i];
+                let variance = sqSum / x.length;
+                let invStd = 1.0 / Math.sqrt(variance + eps);
                 
-                // PHASE 2: INGEST (using BF16_BYTES)
-                const byteOffset = lastTokenId * HIDDEN_SIZE * BF16_BYTES;
-                const vectorSlice = embedFile.slice(byteOffset, byteOffset + (HIDDEN_SIZE * BF16_BYTES));
-                
-                const embedBytes = new Uint8Array(await vectorSlice.arrayBuffer());
-                let hiddenState = decodeBfloat16(embedBytes); // Expand to Float32
-                
-                if (Number.isNaN(hiddenState[0])) throw new Error("Extracted embedding vector contains NaN!");
-                logToTerminal(`[INGEST] Vector Extracted. Dim 0: ${hiddenState[0].toFixed(4)}`, 'system');
-
-                // --- PHASE 3: TRANSFORMER CORE ---
-                logToTerminal(`[TRANSFORMER] Loading Layer 0 Input RMSNorm...`, 'system');
-                const normFile = await getModelFromOPFS(
-                    'projected_model.layers.0.input_layernorm.weight.bin', 
-                    '/model/i7/projected_model.layers.0.input_layernorm.weight.bin'
-                );
-                
-                const normBytes = new Uint8Array(await normFile.arrayBuffer());
-                const normWeight = decodeBfloat16(normBytes); // Expand to Float32
-                
-                if (normWeight.length !== HIDDEN_SIZE) {
-                    throw new Error(`RMSNorm weight mismatch! Expected ${HIDDEN_SIZE} floats, got ${normWeight.length}.`);
+                let out = new Float32Array(x.length);
+                for (let i = 0; i < x.length; i++) {
+                    out[i] = (x[i] * invStd) * weight[i];
                 }
+                return out;
+            }
+        };
 
-                hiddenState = rmsnorm(hiddenState, normWeight);
+        // ==========================================
+        // MODULE: CORE INFERENCE
+        // ==========================================
+        const SwanCore = {
+            tokenizer: null,
 
-                if (Number.isNaN(hiddenState[0])) throw new Error("RMSNorm mathematical collapse (NaN)!");
+            async init() {
+                SwanUI.log("System terminal initialized...", "log");
+                
+                // Init SSE
+                const evtSource = new EventSource("/api/events");
+                evtSource.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        SwanUI.log(data.message, data.type);
+                    } catch (e) {}
+                };
 
-                logToTerminal(`[TRANSFORMER] RMSNorm applied. Dim 0 shifted to: ${hiddenState[0].toFixed(4)}`, 'system');
-                logToTerminal(`[TRANSFORMER] (Attention Block Pending Implementation...)`, 'system');
+                try {
+                    const res = await fetch('/api/check');
+                    if ((await res.json()).ready) {
+                        SwanUI.log("Pipeline Verified.", "system");
+                    } else {
+                        fetch('/api/install'); // Trigger background installation
+                    }
+                } catch(e) {}
 
+                try {
+                    SwanUI.log("Initializing Tokenizer Engine...", "system");
+                    SwanCore.tokenizer = await AutoTokenizer.from_pretrained('Xenova/Qwen1.5-0.5B');
+                    SwanUI.setReady();
+                } catch (e) {
+                    SwanUI.log(`Tokenizer Error: ${e.message}`, "error");
+                }
+            },
 
-                // --- PHASE 4: FULL EGRESS DECODING ---
-                logToTerminal("[EGRESS] Streaming LM_Head projection from OPFS...", 'system');
+            async runInference() {
+                /** @type {HTMLInputElement} */
+                const promptEl = (document.getElementById('prompt'));
+                const input = promptEl.value;
+                if (!input || !SwanCore.tokenizer) return;
 
-                const reader = embedFile.stream().getReader();
-                let processedBytes = 0;
-                let leftover = new Uint8Array(0);
-                let loopCount = 0;
+                SwanUI.btn.disabled = true;
+                SwanUI.log(`\n[USER] ${input}`, 'log');
+                
+                try {
+                    // INGEST
+                    const tokens = SwanCore.tokenizer.encode(input);
+                    const lastTokenId = tokens[tokens.length - 1];
+                    SwanUI.log(`[TOKENIZER] BPE IDs: [${tokens.join(', ')}]`, 'system');
 
-                let maxActivation = -Infinity;
-                let bestTokenId = -1;
-                let currentTokenId = 0;
-                let currentActivation = 0;
-                let hiddenDimIndex = 0;
-
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-
-                    processedBytes += value.length;
-
-                    const merged = new Uint8Array(leftover.length + value.length);
-                    merged.set(leftover);
-                    merged.set(value, leftover.length);
-
-                    // BF16 bytes MUST be processed in multiples of 2!
-                    const validLength = merged.length - (merged.length % 2);
-                    leftover = merged.slice(validLength); 
+                    const embedFile = await SwanStorage.getModelFile('projected_embed_tokens.bin', '/model/i7/projected_embed_tokens.bin');
                     
-                    const bf16Chunk = merged.slice(0, validLength);
-                    const floats = decodeBfloat16(bf16Chunk);
+                    const byteOffset = lastTokenId * Config.HIDDEN_SIZE * Config.BF16_BYTES;
+                    const vectorSlice = embedFile.slice(byteOffset, byteOffset + (Config.HIDDEN_SIZE * Config.BF16_BYTES));
+                    
+                    const embedBytes = new Uint8Array(await vectorSlice.arrayBuffer());
+                    let hiddenState = SwanMath.decodeBfloat16(embedBytes);
+                    
+                    if (Number.isNaN(hiddenState[0])) throw new Error("Extracted embedding is NaN!");
 
-                    for(let i = 0; i < floats.length; i++) {
-                        currentActivation += floats[i] * hiddenState[hiddenDimIndex];
-                        hiddenDimIndex++;
+                    // TRANSFORMER (Layer 0 Scaffold)
+                    const normFile = await SwanStorage.getModelFile('projected_model.layers.0.input_layernorm.weight.bin', '/model/i7/projected_model.layers.0.input_layernorm.weight.bin');
+                    const normWeight = SwanMath.decodeBfloat16(new Uint8Array(await normFile.arrayBuffer()));
+                    
+                    hiddenState = SwanMath.rmsnorm(hiddenState, normWeight);
+                    if (Number.isNaN(hiddenState[0])) throw new Error("RMSNorm output NaN!");
 
-                        if (hiddenDimIndex === HIDDEN_SIZE) {
-                            if (currentActivation > maxActivation) {
-                                maxActivation = currentActivation;
-                                bestTokenId = currentTokenId;
+                    // EGRESS
+                    SwanUI.log("[EGRESS] Streaming Vocabulary Logits...", 'system');
+                    const reader = embedFile.stream().getReader();
+                    
+                    let maxActivation = -Infinity;
+                    let bestTokenId = -1;
+                    
+                    let processedBytes = 0;
+                    let leftover = new Uint8Array(0);
+                    let loopCount = 0;
+                    
+                    let currentTokenId = 0;
+                    let currentActivation = 0;
+                    let hiddenDimIndex = 0;
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+
+                        processedBytes += value.length;
+                        const merged = new Uint8Array(leftover.length + value.length);
+                        merged.set(leftover);
+                        merged.set(value, leftover.length);
+
+                        const validLength = merged.length - (merged.length % 2);
+                        leftover = merged.slice(validLength); 
+                        
+                        const floats = SwanMath.decodeBfloat16(merged.slice(0, validLength));
+
+                        for(let i = 0; i < floats.length; i++) {
+                            currentActivation += floats[i] * hiddenState[hiddenDimIndex];
+                            hiddenDimIndex++;
+
+                            if (hiddenDimIndex === Config.HIDDEN_SIZE) {
+                                if (currentActivation > maxActivation) {
+                                    maxActivation = currentActivation;
+                                    bestTokenId = currentTokenId;
+                                }
+                                currentTokenId++;
+                                currentActivation = 0;
+                                hiddenDimIndex = 0;
                             }
-                            currentTokenId++;
-                            currentActivation = 0;
-                            hiddenDimIndex = 0;
+                        }
+
+                        loopCount++;
+                        if (loopCount % 5 === 0) {
+                            SwanUI.status.innerText = `Egress Math: ${(processedBytes / 1024 / 1024).toFixed(1)} MB...`;
+                            await new Promise(r => setTimeout(r, 0));
                         }
                     }
 
-                    loopCount++;
-                    if (loopCount % 5 === 0) {
-                        statusDiv.innerText = `Computing Egress: ${(processedBytes / 1024 / 1024).toFixed(1)} MB...`;
-                        await new Promise(r => setTimeout(r, 0));
-                    }
+                    const predictedText = SwanCore.tokenizer.decode([bestTokenId]);
+                    SwanUI.log(`\n[DECODER] Max Activation: ${maxActivation.toFixed(4)}`, 'system');
+                    SwanUI.log(`[OUTPUT] "${predictedText}"\n`, 'log');
+
+                } catch (e) {
+                    SwanUI.log(`Inference Error: ${e.message}`, 'error');
+                } finally {
+                    SwanUI.setReady();
+                    SwanUI.btn.disabled = false;
                 }
-
-                if (bestTokenId === -1) throw new Error("Egress failed to find a valid token activation.");
-
-                const predictedText = tokenizer.decode([bestTokenId]);
-                logToTerminal(`\n[DECODER] Max Activation: ${maxActivation.toFixed(4)}`, 'system');
-                logToTerminal(`[DECODER] Predicted ID: ${bestTokenId}`, 'system');
-                logToTerminal(`[OUTPUT] "${predictedText}"\n`, 'log');
-
-                setReady();
-            } catch (e) {
-                logToTerminal(`Inference Error: ${e.message}`, 'error');
-                setReady();
-            } finally {
-                sendBtn.disabled = false;
             }
-        }
+        };
 
-        setTimeout(init, 500);
+        // Expose to window for the HTML button
+        window.SwanCore = SwanCore;
+
+        setTimeout(SwanCore.init, 500);
     </script>
 </body>
 </html>
