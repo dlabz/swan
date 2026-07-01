@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-black">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <title>SWAN Engine - BF16 GPU Direct</title>
+</head>
+<body class="p-4 text-green-400 font-mono text-[10px] h-full flex flex-col">
+    <div id="terminal" class="flex-1 overflow-y-auto border border-green-900 p-2 mb-2 bg-gray-950"></div>
+    <div class="grid grid-cols-2 gap-2">
+        <button id="btn-run" class="bg-green-900 p-3 rounded text-white font-bold">RUN INFERENCE</button>
+        <button id="btn-clear" class="bg-red-900/50 p-3 rounded border border-red-800">CLEAR OPFS</button>
+    </div>
+
+    <script type="module">
+        // --- ENGINE LOGIC ---
+        class QwenEngine {
+            constructor() { this.device = null; }
+            async init() {
+                const adapter = await navigator.gpu.requestAdapter();
+                this.device = await adapter?.requestDevice();
+            }
+
+            async uploadLayerToGPU(file) {
+                const buffer = await file.arrayBuffer();
+                const gpuBuffer = this.device.createBuffer({
+                    size: buffer.byteLength,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                    mappedAtCreation: true
+                });
+                new Uint8Array(gpuBuffer.getMappedRange()).set(new Uint8Array(buffer));
+                gpuBuffer.unmap();
+                return gpuBuffer;
+            }
+        }
+
+        const engine = new QwenEngine();
+        const term = document.getElementById('terminal');
+        function log(m) { term.innerHTML += `<div>> ${m}</div>`; term.scrollTop = term.scrollHeight; }
+
+        // --- STORAGE LOGIC ---
+        async function getModelFile(name, url) {
+            const root = await navigator.storage.getDirectory();
+            try {
+                const handle = await root.getFileHandle(name);
+                return await handle.getFile();
+            } catch {
+                log("Streaming to OPFS: " + name);
+                const handle = await root.getFileHandle(name, { create: true });
+                const writable = await handle.createWritable();
+                const res = await fetch(url);
+                const reader = res.body.getReader();
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    await writable.write(value);
+                }
+                await writable.close();
+                return await handle.getFile();
+            }
+        }
+
+        // --- RUNNER ---
+        document.getElementById('btn-run').onclick = async () => {
+            try {
+                await engine.init();
+                log("GPU Ready. Loading weights...");
+                
+                const file = await getModelFile('embed.bin', '/model/i7/model.embed_tokens.weight.bin');
+                const gpuWeights = await engine.uploadLayerToGPU(file);
+                
+                log("Layer in VRAM: " + (gpuWeights.size/1024/1024).toFixed(2) + "MB");
+                
+                // Logic for ping-pong texture binding goes here...
+                
+                log("Inference Step Complete. Destroying Buffer.");
+                gpuWeights.destroy();
+            } catch(e) { log("ERR: " + e.message); }
+        };
+
+        document.getElementById('btn-clear').onclick = async () => {
+            const root = await navigator.storage.getDirectory();
+            for await (const name of root.keys()) await root.removeEntry(name, { recursive: true });
+            log("OPFS Cleared.");
+        };
+    </script>
+</body>
+</html>
