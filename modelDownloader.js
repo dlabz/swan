@@ -2,52 +2,38 @@ const fs = require('fs');
 const fsPromises = require('fs/promises');
 const path = require('path');
 const { pipeline } = require('stream/promises');
-const { crc32 } = require('crc'); // You may need 'npm install crc'
+const { HfApi } = require('@huggingface/hub');
+const { crc32 } = require('crc');
 
 const F32_DIR = path.resolve(__dirname, 'data', 'model', 'f32');
-const META_DIR = path.resolve(__dirname, 'data', 'model', 'meta');
+const hf = new HfApi();
 
-async function downloadAndIndexModel(url, modelName, expectedCrc) {
-    const dest = path.join(F32_DIR, `${modelName}.raw`);
+async function downloadAndIndexModel(repoId) {
+    await fsPromises.mkdir(F32_DIR, { recursive: true });
+
+    // 1. Fetch file list from HF
+    const files = await hf.list({ repoId });
+    const safetensors = files.filter(f => f.path.endsWith('.safetensors'));
     
-    // 1. Cache Check
-    try {
-        const stats = await fsPromises.stat(dest);
-        if (stats.size > 0) {
-            console.log(`Cache hit for ${modelName}, verifying integrity...`);
-            return { rawPath: dest, cached: true };
+    console.log(`Found ${safetensors.length} files in ${repoId}...`);
+
+    for (const file of safetensors) {
+        const url = `https://huggingface.co/${repoId}/resolve/main/${file.path}`;
+        const dest = path.join(F32_DIR, file.path.replace(/\//g, '_'));
+
+        // Skip if exists
+        if (fs.existsSync(dest)) {
+            console.log(`Skipping ${file.path}, already exists.`);
+            continue;
         }
-    } catch {}
 
-    // 2. Download
-    console.log(`Downloading ${modelName} from ${url}...`);
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-    // Stream and compute CRC32 simultaneously
-    const writeStream = fs.createWriteStream(dest);
-    let checksum = 0;
-    
-    // Custom transform stream for CRC32 calculation
-    const crcStream = new TransformStream({
-        transform(chunk, controller) {
-            checksum = crc32(chunk, checksum);
-            controller.enqueue(chunk);
-        }
-    });
-
-    await pipeline(response.body, crcStream, writeStream);
-
-    // 3. Verify
-    const hexCrc = (checksum >>> 0).toString(16);
-    console.log(`Download complete. CRC32: ${hexCrc}`);
-    
-    if (expectedCrc && hexCrc !== expectedCrc) {
-        await fsPromises.unlink(dest);
-        throw new Error(`Integrity mismatch! Expected ${expectedCrc}, got ${hexCrc}`);
+        console.log(`Downloading ${file.path}...`);
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status} for ${file.path}`);
+        
+        await pipeline(response.body, fs.createWriteStream(dest));
+        console.log(`Finished ${file.path}`);
     }
-
-    return { rawPath: dest, cached: false };
 }
 
 module.exports = { downloadAndIndexModel };
