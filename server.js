@@ -7,7 +7,7 @@ const { fetchAndProject, I7_DIR } = require('./manifoldController');
 const app = express();
 app.use(express.static('public'));
 
-// Serve the projected manifold files
+// Serve the projected manifold files directly to the front-end
 app.use('/model/i7', express.static(I7_DIR));
 
 app.get('/api/check', async (req, res) => {
@@ -18,9 +18,12 @@ app.get('/api/check', async (req, res) => {
 
 app.get('/api/install', async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
     try {
         res.write(`data: ${JSON.stringify({ status: 'FETCHING_FROM_HF' })}\n\n`);
-        await fetchAndProject('weights_000.bin'); // Repo ID 'dlabz/swan' is hardcoded in controller
+        await fetchAndProject('weights_000.bin');
         
         res.write(`data: ${JSON.stringify({ status: 'READY' })}\n\n`);
         res.end();
