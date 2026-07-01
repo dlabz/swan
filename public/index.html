@@ -44,9 +44,40 @@
             }
         }
 
+        
         async function runInference() {
-            // ... (Your existing runInference logic remains here)
+            const input = document.getElementById('prompt').value;
+            const output = document.getElementById('output');
+            const vocab = { "hello": 101, "how": 102, "are": 103, "you": 104, "swan": 105, "clifford": 106 };
+            
+            // 1. Tokenize & Project
+            const tokens = input.toLowerCase().split(' ').map(w => vocab[w] || 0);
+            const projection = tokens.map(t => Math.tanh(t * 0.003));
+            
+            // 2. Fetch the already-stabilized manifold file from server
+            const res = await fetch('/model/i7/weights_000.bin');
+            const buffer = await res.arrayBuffer();
+            const weights = new Float32Array(buffer);
+
+            // 3. Inference Loop (The "Math")
+            let prediction = 0;
+            const len = Math.min(projection.length, weights.length);
+            for(let i = 0; i < len; i++) {
+                prediction += projection[i] * weights[i];
+            }
+
+            // 4. Result display
+            output.innerHTML = `
+                <div class="animate-in fade-in">
+                    <p class="text-xs text-green-700">Tokens: [${tokens.join(', ')}]</p>
+                    <p class="text-white mt-2 text-xl tracking-widest">
+                        Manifold output: <span class="text-blue-400 font-bold">${prediction.toFixed(6)}</span>
+                    </p>
+                </div>`;
         }
+
+
+
 
         init();
     </script>
