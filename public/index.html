@@ -19,59 +19,57 @@
             <p class="text-gray-400">Initializing system...</p>
         </div>
 
-        <input type="text" id="prompt" class="w-full bg-gray-900 border border-green-800 p-3 text-white outline-none" placeholder="Enter query...">
+        <div id="controls" class="hidden flex gap-2">
+            <input type="text" id="prompt" class="flex-1 bg-gray-900 border border-green-800 p-3 text-white outline-none" placeholder="Enter query...">
+            <button onclick="runInference()" class="bg-green-900 px-6 py-2 hover:bg-green-700 text-white font-bold">SEND</button>
+        </div>
     </div>
 
     <script>
-        // Automatic Pipeline Sync
         async function init() {
-    const statusDiv = document.getElementById('status');
-    
-    // Check state
-    const res = await fetch('/api/check');
-    const { ready } = await res.json();
+            const statusDiv = document.getElementById('status');
+            const controls = document.getElementById('controls');
+            
+            const res = await fetch('/api/check');
+            const { ready } = await res.json();
 
-    if (!ready) {
-        statusDiv.innerText = "Installing...";
-        try {
-            const installRes = await fetch('/api/install');
-            const data = await installRes.json();
-            if (data.status === 'READY') {
+            if (!ready) {
+                statusDiv.innerText = "Installing: Projecting all layers...";
+                try {
+                    const installRes = await fetch('/api/install');
+                    const data = await installRes.json();
+                    if (data.status === 'READY') {
+                        statusDiv.innerText = "System Ready";
+                        controls.classList.remove('hidden');
+                    }
+                } catch (e) {
+                    statusDiv.innerText = "Error: " + e.message;
+                }
+            } else {
                 statusDiv.innerText = "System Ready";
+                controls.classList.remove('hidden');
             }
-        } catch (e) {
-            statusDiv.innerText = "Error: " + e.message;
         }
-    } else {
-        statusDiv.innerText = "System Ready";
-    }
-}
-
-
-
         
         async function runInference() {
             const input = document.getElementById('prompt').value;
             const output = document.getElementById('output');
             const vocab = { "hello": 101, "how": 102, "are": 103, "you": 104, "swan": 105, "clifford": 106 };
             
-            // 1. Tokenize & Project
             const tokens = input.toLowerCase().split(' ').map(w => vocab[w] || 0);
             const projection = tokens.map(t => Math.tanh(t * 0.003));
             
-            // 2. Fetch the already-stabilized manifold file from server
-            const res = await fetch('/model/i7/weights_000.bin');
+            // Note: Update this filename to one of your successfully projected files
+            const res = await fetch('/model/i7/projected_lm_head.bin');
             const buffer = await res.arrayBuffer();
             const weights = new Float32Array(buffer);
 
-            // 3. Inference Loop (The "Math")
             let prediction = 0;
             const len = Math.min(projection.length, weights.length);
             for(let i = 0; i < len; i++) {
                 prediction += projection[i] * weights[i];
             }
 
-            // 4. Result display
             output.innerHTML = `
                 <div class="animate-in fade-in">
                     <p class="text-xs text-green-700">Tokens: [${tokens.join(', ')}]</p>
@@ -80,9 +78,6 @@
                     </p>
                 </div>`;
         }
-
-
-
 
         init();
     </script>
