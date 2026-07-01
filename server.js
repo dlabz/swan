@@ -5,18 +5,14 @@ const path = require('path');
 const { fetchAndProject, I7_DIR } = require('./manifoldController');
 
 const app = express();
-
-// Ensure the directory exists to prevent "root path required" error
-if (!I7_DIR) {
-    console.error("Critical: I7_DIR is undefined!");
-    process.exit(1);
-}
-
 app.use(express.static('public'));
+
+// Serve the projected models from the correct directory
 app.use('/model/i7', express.static(I7_DIR));
 
 app.get('/api/check', async (req, res) => {
     try {
+        // Checking for the file in data/i7/
         await fs.access(path.join(I7_DIR, 'projected_model.safetensors'));
         res.json({ ready: true });
     } catch {
