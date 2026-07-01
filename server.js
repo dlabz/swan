@@ -65,24 +65,25 @@ app.get('/api/check', async (req, res) => {
     }
 });
 
-// Start Installation Pipeline
+
 app.get('/api/install', async (req, res) => {
-    res.json({ status: 'STARTED', message: 'Installation running. Connect to /api/events for progress.' });
-
     try {
-        broadcast({ type: 'system', message: 'Starting SWAN Engine Installation Pipeline...' });
-        
-        broadcast({ type: 'system', message: 'PHASE 1: Download & Indexing' });
         await downloadAndIndexModel("Qwen/Qwen2.5-Coder-1.5B-Instruct");
-
-        broadcast({ type: 'system', message: 'PHASE 2: Manifold Projection' });
         await projectAllLayers();
-
-        broadcast({ type: 'complete', message: 'System Ready.' });
+        
+        // ADD THIS CHECK: Verify the file actually exists before saying success
+        const fs = require('fs');
+        const target = path.resolve(__dirname, 'data/model/i7/projected_embed_tokens.bin');
+        if (fs.existsSync(target)) {
+            res.json({ status: 'success' });
+        } else {
+            throw new Error("Extraction finished, but file is missing.");
+        }
     } catch (e) {
-        broadcast({ type: 'error', message: `Installation Failed: ${e.message}` });
+        res.status(500).json({ error: e.message });
     }
 });
+
 
 app.listen(3000, () => {
     originalLog('Swan Engine active on port 3000');
