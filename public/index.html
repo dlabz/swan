@@ -2,47 +2,33 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>SWAN Engine | Core</title>
-    <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
-    <script>eruda.init();</script>
+    <title>SWAN Engine</title>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-black text-green-400 p-4 font-mono">
-    <div id="terminal" class="h-[70vh] overflow-y-auto mb-4 border border-green-800 p-2"></div>
-    <div class="flex gap-2">
-        <input id="prompt" class="bg-gray-900 border border-green-800 p-2 w-full text-white outline-none">
-        <button id="send" class="bg-green-900 px-4">RUN</button>
-    </div>
+<body class="bg-black text-green-400 p-4">
+    <div id="terminal" class="h-[60vh] border border-green-800 p-2 overflow-y-auto"></div>
+    <input id="prompt" class="w-full bg-gray-900 border border-green-800 p-2 mt-2">
+    <button id="run" class="mt-2 bg-green-900 px-4 py-2">RUN INFERENCE</button>
 
     <script type="module">
-        import { SwanStorage, SwanMath, SwanUI } from './js/swan.js';
+        import { SwanPipeline, SwanUI, SwanStorage } from './js/swan.js';
         import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js';
 
-        let tokenizer;
-
-        async function init() {
+        async function bootstrap() {
             try {
-                tokenizer = await AutoTokenizer.from_pretrained('Xenova/Qwen1.5-0.5B');
-                SwanUI.log("Engine Initialized. Model Ready.");
-            } catch(e) { SwanUI.log(e.message, 'error'); }
+                await SwanPipeline.ensureReady(SwanUI);
+                const tokenizer = await AutoTokenizer.from_pretrained('Xenova/Qwen1.5-0.5B');
+                SwanUI.log("Tokenizer ready. Engine operational.");
+                
+                document.getElementById('run').onclick = async () => {
+                    const file = await SwanStorage.getModelFile('embed.bin', '/model/i7/projected_embed_tokens.bin');
+                    SwanUI.log(`File loaded: ${file.size} bytes`);
+                };
+            } catch (e) {
+                SwanUI.log(e.message, 'error');
+            }
         }
-
-        document.getElementById('send').onclick = async () => {
-            const input = document.getElementById('prompt').value;
-            try {
-                const tokens = tokenizer.encode(input);
-                const file = await SwanStorage.getModelFile('embed.bin', '/model/i7/projected_embed_tokens.bin');
-                
-                // Offset calculation: token_id * hidden_size * 2 bytes
-                const offset = tokens[0] * 1536 * 2;
-                const blob = file.slice(offset, offset + (1536 * 2));
-                const vec = SwanMath.decodeBfloat16(new Uint8Array(await blob.arrayBuffer()));
-                
-                SwanUI.log(`Vector successfully ingested. Dim 0: ${vec[0].toFixed(4)}`);
-            } catch(e) { SwanUI.log(e.message, 'error'); }
-        };
-
-        init();
+        bootstrap();
     </script>
 </body>
 </html>
