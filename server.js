@@ -1,4 +1,3 @@
-```javascript
 const express = require('express');
 const fs = require('fs/promises');
 const path = require('path');
@@ -29,5 +28,3 @@ app.get('/api/install', async (req, res) => {
 });
 
 app.listen(3000, () => console.log('Swan Engine active on port 3000'));
-
-```
