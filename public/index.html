@@ -10,9 +10,12 @@
 </head>
 <body class="bg-black text-green-400 font-mono p-4 flex flex-col h-screen">
     <div class="max-w-3xl mx-auto w-full flex flex-col h-full">
-        <header class="mb-4 border-b border-green-800 pb-4 shrink-0">
-            <h1 class="text-2xl font-bold tracking-widest text-white">SWAN INFERENCE</h1>
-            <div id="status" class="text-xs text-yellow-500 font-bold">Initializing Engine Modules...</div>
+        <header class="mb-4 border-b border-green-800 pb-4 shrink-0 flex justify-between items-end">
+            <div>
+                <h1 class="text-2xl font-bold tracking-widest text-white">SWAN INFERENCE</h1>
+                <div id="status" class="text-xs text-yellow-500 font-bold">Initializing Engine Modules...</div>
+            </div>
+            <button onclick="SwanStorage.clearCache()" class="text-xs border border-red-800 text-red-500 hover:bg-red-900 px-3 py-1 transition">Reset OPFS Cache</button>
         </header>
 
         <div id="terminal" class="bg-gray-900 p-4 rounded border border-green-800 mb-4 flex-1 overflow-y-auto text-xs whitespace-pre-wrap"></div>
@@ -24,52 +27,36 @@
     </div>
 
     <script type="module">
-        // @ts-check
-        /// <reference path="./swan.d.ts" />
-        
         import { env, AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js';
         env.allowLocalModels = false;
 
-        // ==========================================
-        // MODULE: CONFIGURATION
-        // ==========================================
         const Config = {
             HIDDEN_SIZE: 1536,
             BF16_BYTES: 2,
-            MAX_CHUNK_SIZE: 5 * 1024 * 1024 // 5MB
+            MAX_CHUNK_SIZE: 5 * 1024 * 1024
         };
 
-        // ==========================================
-        // MODULE: UI & LOGGER
-        // ==========================================
         const SwanUI = {
-            terminal: /** @type {HTMLElement} */ (document.getElementById('terminal')),
-            status: /** @type {HTMLElement} */ (document.getElementById('status')),
-            controls: /** @type {HTMLElement} */ (document.getElementById('controls')),
-            btn: /** @type {HTMLButtonElement} */ (document.getElementById('sendBtn')),
-            buffer: /** @type {string[]} */ ([]),
+            terminal: document.getElementById('terminal'),
+            status: document.getElementById('status'),
+            controls: document.getElementById('controls'),
+            btn: document.getElementById('sendBtn'),
+            buffer: [],
             isLogging: false,
 
             flush() {
-                if (SwanUI.buffer.length === 0) {
-                    SwanUI.isLogging = false; return;
-                }
+                if (SwanUI.buffer.length === 0) { SwanUI.isLogging = false; return; }
                 SwanUI.terminal.innerHTML += SwanUI.buffer.join('');
                 SwanUI.buffer = [];
                 SwanUI.terminal.scrollTop = SwanUI.terminal.scrollHeight;
                 requestAnimationFrame(SwanUI.flush);
             },
 
-            /** @param {string} msg @param {'log'|'error'|'system'} type */
             log(msg, type = 'log') {
                 const color = type === 'error' ? 'text-red-500' : type === 'system' ? 'text-blue-400 font-bold' : 'text-green-500';
                 SwanUI.buffer.push(`<div class="${color}">> ${msg}</div>`);
-                if (!SwanUI.isLogging) {
-                    SwanUI.isLogging = true;
-                    requestAnimationFrame(SwanUI.flush);
-                }
-                if (type === 'error') console.error(msg);
-                else console.log(msg);
+                if (!SwanUI.isLogging) { SwanUI.isLogging = true; requestAnimationFrame(SwanUI.flush); }
+                if (type === 'error') console.error(msg); else console.log(msg);
             },
 
             setReady() {
@@ -79,16 +66,7 @@
             }
         };
 
-        // ==========================================
-        // MODULE: STORAGE (OPFS)
-        // ==========================================
         const SwanStorage = {
-            /**
-             * Safely retrieves or chunk-downloads a file to OPFS.
-             * @param {string} filename 
-             * @param {string} url 
-             * @returns {Promise<File>}
-             */
             async getModelFile(filename, url) {
                 const opfsRoot = await navigator.storage.getDirectory();
                 const fileHandle = await opfsRoot.getFileHandle(filename, { create: true });
@@ -98,10 +76,11 @@
                 const totalSize = parseInt(headRes.headers.get('content-length') || "0", 10);
                 
                 if (fileInfo.size > 0 && (totalSize === 0 || fileInfo.size === totalSize)) {
+                    SwanUI.log(`[Cache Hit] Loaded ${filename} from OPFS.`, 'system');
                     return fileInfo;
                 }
 
-                SwanUI.log(`Downloading ${filename}...`, 'system');
+                SwanUI.log(`Downloading fresh copy of ${filename}...`, 'system');
                 const writable = await fileHandle.createWritable();
                 
                 if (totalSize > Config.MAX_CHUNK_SIZE) {
@@ -120,24 +99,25 @@
                 
                 await writable.close();
                 return await fileHandle.getFile();
+            },
+
+            async clearCache() {
+                if(!confirm("Are you sure you want to wipe the 450MB OPFS Model Cache? You will need to re-download it on the next run.")) return;
+                try {
+                    const opfsRoot = await navigator.storage.getDirectory();
+                    // @ts-ignore - TS DOM lib missing async iterator for OPFS, but it exists
+                    for await (const name of opfsRoot.keys()) {
+                        await opfsRoot.removeEntry(name, { recursive: true });
+                    }
+                    SwanUI.log("OPFS Cache completely wiped. Reloading page...", "system");
+                    setTimeout(() => window.location.reload(), 1500);
+                } catch(e) {
+                    SwanUI.log(`Failed to clear cache: ${e.message}`, "error");
+                }
             }
         };
 
-        // ==========================================
-        // MODULE: MATH TENSORS
-        // ==========================================
         const SwanMath = {
-            /**
-             * Decodes a Little-Endian Bfloat16 binary array into IEEE-754 Float32.
-             * * Kaitai Struct Mapping:
-             * bfloat16:
-             * seq:
-             * - id: byte0 (Mantissa tail)
-             * - id: byte1 (Sign + Exponent + Mantissa head)
-             * Float32 requires: [0x00, 0x00, byte0, byte1] (on LE architecture)
-             * * @param {Uint8Array} bf16Bytes - 2-byte aligned raw data
-             * @returns {Float32Array}
-             */
             decodeBfloat16(bf16Bytes) {
                 const f32Bytes = new Uint8Array(bf16Bytes.length * 2);
                 for (let i = 0; i < bf16Bytes.length; i += 2) {
@@ -147,13 +127,6 @@
                 return new Float32Array(f32Bytes.buffer);
             },
 
-            /**
-             * Root Mean Square Normalization
-             * @param {Float32Array} x - Input vector
-             * @param {Float32Array} weight - Learned scaling parameters
-             * @param {number} eps - Epsilon to prevent division by zero
-             * @returns {Float32Array}
-             */
             rmsnorm(x, weight, eps = 1e-6) {
                 let sqSum = 0;
                 for (let i = 0; i < x.length; i++) sqSum += x[i] * x[i];
@@ -165,19 +138,22 @@
                     out[i] = (x[i] * invStd) * weight[i];
                 }
                 return out;
+            },
+            
+            // Deep scanner to find exactly which dimension corrupts
+            validateVector(arr, context) {
+                for(let i = 0; i < arr.length; i++) {
+                    if (Number.isNaN(arr[i])) throw new Error(`NaN encountered at dimension ${i} during ${context}`);
+                }
             }
         };
 
-        // ==========================================
-        // MODULE: CORE INFERENCE
-        // ==========================================
         const SwanCore = {
             tokenizer: null,
 
             async init() {
                 SwanUI.log("System terminal initialized...", "log");
                 
-                // Init SSE
                 const evtSource = new EventSource("/api/events");
                 evtSource.onmessage = (event) => {
                     try {
@@ -191,7 +167,7 @@
                     if ((await res.json()).ready) {
                         SwanUI.log("Pipeline Verified.", "system");
                     } else {
-                        fetch('/api/install'); // Trigger background installation
+                        fetch('/api/install'); 
                     }
                 } catch(e) {}
 
@@ -205,8 +181,7 @@
             },
 
             async runInference() {
-                /** @type {HTMLInputElement} */
-                const promptEl = (document.getElementById('prompt'));
+                const promptEl = document.getElementById('prompt');
                 const input = promptEl.value;
                 if (!input || !SwanCore.tokenizer) return;
 
@@ -214,7 +189,6 @@
                 SwanUI.log(`\n[USER] ${input}`, 'log');
                 
                 try {
-                    // INGEST
                     const tokens = SwanCore.tokenizer.encode(input);
                     const lastTokenId = tokens[tokens.length - 1];
                     SwanUI.log(`[TOKENIZER] BPE IDs: [${tokens.join(', ')}]`, 'system');
@@ -227,16 +201,19 @@
                     const embedBytes = new Uint8Array(await vectorSlice.arrayBuffer());
                     let hiddenState = SwanMath.decodeBfloat16(embedBytes);
                     
-                    if (Number.isNaN(hiddenState[0])) throw new Error("Extracted embedding is NaN!");
+                    SwanMath.validateVector(hiddenState, "Embedding Extraction");
+                    SwanUI.log(`[INGEST] Vector Extracted. Dim 0: ${hiddenState[0].toFixed(4)}`, 'system');
 
-                    // TRANSFORMER (Layer 0 Scaffold)
                     const normFile = await SwanStorage.getModelFile('projected_model.layers.0.input_layernorm.weight.bin', '/model/i7/projected_model.layers.0.input_layernorm.weight.bin');
                     const normWeight = SwanMath.decodeBfloat16(new Uint8Array(await normFile.arrayBuffer()));
                     
+                    SwanMath.validateVector(normWeight, "RMSNorm Weight Load");
+                    
                     hiddenState = SwanMath.rmsnorm(hiddenState, normWeight);
-                    if (Number.isNaN(hiddenState[0])) throw new Error("RMSNorm output NaN!");
+                    SwanMath.validateVector(hiddenState, "RMSNorm Math Applied");
+                    
+                    SwanUI.log(`[TRANSFORMER] RMSNorm applied. Dim 0 shifted to: ${hiddenState[0].toFixed(4)}`, 'system');
 
-                    // EGRESS
                     SwanUI.log("[EGRESS] Streaming Vocabulary Logits...", 'system');
                     const reader = embedFile.stream().getReader();
                     
@@ -300,7 +277,7 @@
             }
         };
 
-        // Expose to window for the HTML button
+        window.SwanStorage = SwanStorage;
         window.SwanCore = SwanCore;
 
         setTimeout(SwanCore.init, 500);
