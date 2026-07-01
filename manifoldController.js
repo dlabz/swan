@@ -3,13 +3,6 @@ const path = require('path');
 
 const I7_DIR = path.resolve(__dirname, 'data', 'model', 'i7');
 
-async function downloadAndProject(filename, rows, cols, isLmHead = false) {
-    if (isLmHead) {
-        return await projectLmHead(filename, rows, cols);
-    } else {
-        return await projectEmbedding(filename, rows, cols);
-    }
-}
 
 async function projectLmHead(filename, rows, cols) {
     const rawPath = path.resolve(I7_DIR, filename);
@@ -53,4 +46,30 @@ async function projectEmbedding(filename, rows, cols) {
     return targetPath;
 }
 
-module.exports = { downloadAndProject, projectLmHead, projectEmbedding, I7_DIR };
+async function projectWeights(filename, rows, cols) {
+    const rawPath = path.resolve(I7_DIR, filename);
+    const targetPath = path.resolve(I7_DIR, `projected_${filename}`);
+    
+    console.log(`Processing Standard Weights: ${filename}`);
+    
+    const buffer = await fs.readFile(rawPath);
+    const data = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
+    const projected = new Float32Array(data.length);
+
+    // Standard projection: Element-wise activation + sine-modulated manifold bias
+    for (let i = 0; i < data.length; i++) {
+        projected[i] = Math.tanh(data[i]) * Math.sin(0.003 * i);
+    }
+
+    await fs.writeFile(targetPath, Buffer.from(projected.buffer));
+    return targetPath;
+}
+
+
+module.exports = { 
+    projectWeights, 
+    projectLmHead, 
+    projectEmbedding, 
+    I7_DIR 
+};
+
