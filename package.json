@@ -4,6 +4,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "clean": "rm -rf data/model/i7",
+    "clean:all": "rm -rf data/model",
     "test:qwen": "node testQwenPipeline.js"
   },
   "dependencies": {
