@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SWAN | Inference Engine</title>
+    <!-- Eruda Mobile Console -->
+    <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
+    <script>eruda.init();</script>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-black text-green-400 font-mono p-4 flex flex-col h-screen">
@@ -27,19 +30,43 @@
         const controls = document.getElementById('controls');
         const sendBtn = document.getElementById('sendBtn');
 
+        // Throttled logging
+        let logBuffer = [];
+        let isLogging = false;
+
+        function flushLogs() {
+            if (logBuffer.length === 0) {
+                isLogging = false;
+                return;
+            }
+            const batch = logBuffer.join('');
+            logBuffer = [];
+            terminal.innerHTML += batch;
+            terminal.scrollTop = terminal.scrollHeight;
+            requestAnimationFrame(flushLogs);
+        }
+
         function logToTerminal(msg, type = 'log') {
             const color = type === 'error' ? 'text-red-500' : type === 'system' ? 'text-blue-400 font-bold' : 'text-green-500';
-            terminal.innerHTML += `<div class="${color}">> ${msg}</div>`;
-            terminal.scrollTop = terminal.scrollHeight;
+            logBuffer.push(`<div class="${color}">> ${msg}</div>`);
+            if (!isLogging) {
+                isLogging = true;
+                requestAnimationFrame(flushLogs);
+            }
+            // Also log to Eruda
+            if (type === 'error') console.error(msg);
+            else console.log(msg);
         }
 
         function connectSSE() {
             const evtSource = new EventSource("/api/events");
             evtSource.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                logToTerminal(data.message, data.type);
-                if (data.type === 'complete') setReady();
-                else if (data.type === 'error') setError();
+                try {
+                    const data = JSON.parse(event.data);
+                    logToTerminal(data.message, data.type);
+                    if (data.type === 'complete') setReady();
+                    else if (data.type === 'error') setError();
+                } catch (e) {}
             };
         }
 
@@ -57,14 +84,43 @@
         async function init() {
             logToTerminal("System terminal initialized...", "log");
             connectSSE();
-            const res = await fetch('/api/check');
-            if ((await res.json()).ready) {
-                setReady();
-                logToTerminal("F32 Cache & I7 Manifold Verified.", "system");
-            } else {
-                statusDiv.innerText = "Installing: Building pipeline...";
-                await fetch('/api/install');
+            try {
+                const res = await fetch('/api/check');
+                if ((await res.json()).ready) {
+                    setReady();
+                    logToTerminal("F32 Cache & I7 Manifold Verified.", "system");
+                } else {
+                    statusDiv.innerText = "Installing: Building pipeline...";
+                    await fetch('/api/install');
+                }
+            } catch(e) {
+                logToTerminal("Check failed. Retrying...", "error");
             }
+        }
+
+        // --- OPFS STORAGE MANAGER ---
+        async function getModelFromOPFS(filename, url) {
+            const opfsRoot = await navigator.storage.getDirectory();
+            let fileHandle;
+            
+            try {
+                fileHandle = await opfsRoot.getFileHandle(filename);
+                const fileInfo = await fileHandle.getFile();
+                if (fileInfo.size === 0) throw new Error("Empty file");
+                logToTerminal(`Found ${filename} in OPFS storage.`, 'system');
+            } catch (e) {
+                logToTerminal(`Downloading ${filename} directly to OPFS...`, 'system');
+                fileHandle = await opfsRoot.getFileHandle(filename, { create: true });
+                const writable = await fileHandle.createWritable();
+                
+                const res = await fetch(url);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                
+                await res.body.pipeTo(writable);
+                logToTerminal(`Saved ${filename} to OPFS.`, 'system');
+            }
+            
+            return await fileHandle.getFile(); 
         }
         
         async function runInference() {
@@ -82,29 +138,14 @@
             const projection = tokens.map(t => Math.tanh(t * 0.003));
             
             try {
-                const modelUrl = '/model/i7/projected_embed_tokens.bin';
-                
-                // --- EXPLICIT BROWSER CACHING ---
-                const cache = await caches.open('swan-manifold-v1');
-                let res = await cache.match(modelUrl);
+                const file = await getModelFromOPFS('projected_embed_tokens.bin', '/model/i7/projected_embed_tokens.bin');
+                logToTerminal("Streaming tensors from local OPFS...", 'system');
 
-                if (!res) {
-                    logToTerminal("Downloading manifold from server (will cache locally)...", 'system');
-                    res = await fetch(modelUrl);
-                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                    
-                    // Clone the response: one copy goes to the persistent cache, the other is consumed below
-                    cache.put(modelUrl, res.clone());
-                } else {
-                    logToTerminal("Manifold loaded from ultra-fast browser cache.", 'system');
-                }
-                
-                const reader = res.body.getReader();
+                const reader = file.stream().getReader();
                 let prediction = 0;
                 let processedBytes = 0;
                 let leftover = new Uint8Array(0);
-
-                logToTerminal("Streaming tensor chunks...", 'system');
+                let loopCount = 0;
 
                 while (true) {
                     const { done, value } = await reader.read();
@@ -125,8 +166,10 @@
                         prediction += projection[i % projection.length] * floats[i];
                     }
 
-                    if (processedBytes % (10 * 1024 * 1024) < 65536) {
-                        statusDiv.innerText = `Processing: ${(processedBytes / 1024 / 1024).toFixed(0)} MB...`;
+                    loopCount++;
+                    if (loopCount % 5 === 0) {
+                        statusDiv.innerText = `Processing: ${(processedBytes / 1024 / 1024).toFixed(1)} MB...`;
+                        await new Promise(r => setTimeout(r, 0)); // Yield to GC
                     }
                 }
 
