@@ -3,11 +3,13 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test:qwen": "node testQwenPipeline.js"
   },
   "dependencies": {
     "express": "^4.21.0",
     "express-async-errors": "^3.1.1",
-    "@huggingface/hub": "^0.17.0"
+    "@huggingface/hub": "^0.17.0",
+    "crc": "^4.3.2"
   }
 }
