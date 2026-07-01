@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <!-- Eruda MUST be the first thing in the document -->
+    <!-- Eruda for mobile debugging -->
     <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
     <script>eruda.init();</script>
     <title>SWAN Engine</title>
@@ -70,7 +70,20 @@
                 SwanUI.log("Tokenizer & Pipeline ready.");
                 
                 document.getElementById('run').onclick = async () => {
-                    const file = await SwanStorage.getModelFile('embed.bin', '/model/i7/model_embed_tokens_weight.bin');
+                    // Fetch real list to resolve filename mismatch
+                    const files = await fetch('/api/files/i7').then(r => r.json());
+                    const targetName = "model.embed_tokens.weight.bin"; // Adjust if needed
+                    const actualFile = files.find(f => f.includes("embed_tokens"));
+                    
+                    if (!actualFile) {
+                        SwanUI.log("Error: Embed shard not found on server.", "error");
+                        return;
+                    }
+
+                    const path = `/model/i7/${actualFile}`;
+                    SwanUI.log(`Loading: ${path}`);
+                    
+                    const file = await SwanStorage.getModelFile('embed.bin', path);
                     SwanUI.log(`Shard Loaded: ${file.size} bytes`);
                 };
             } catch (e) {
