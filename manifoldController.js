@@ -5,7 +5,7 @@ const I7_DIR = path.resolve(__dirname, 'data', 'model', 'i7');
 
 // Qwen2.5-1.5B Architecture: 28 layers, hidden_size 1536
 const H = 1536;
-const I = 8960; // Intermediate size
+const I = 8960;
 
 const MANIFEST = [
     { name: 'model.embed_tokens.bin', rows: 151936, cols: H, type: 'embed' },
@@ -20,6 +20,18 @@ const MANIFEST = [
     ]).flat(),
     { name: 'lm_head.bin', rows: 32000, cols: H, type: 'lm_head' }
 ];
+
+async function getTensorData(buffer) {
+    const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    const headerLength = Number(view.getBigUint64(0, true));
+    
+    // Auto-detect: if length is insane, assume no header (raw dump)
+    if (headerLength > buffer.byteLength || headerLength === 0) {
+        return new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
+    }
+    const offset = 8 + headerLength;
+    return new Float32Array(buffer.buffer, buffer.byteOffset + offset, (buffer.byteLength - offset) / 4);
+}
 
 async function processAllLayers() {
     for (const layer of MANIFEST) {
@@ -38,7 +50,7 @@ async function projectLmHead(filename, rows, cols) {
     const rawPath = path.resolve(I7_DIR, filename);
     const targetPath = path.resolve(I7_DIR, `projected_${filename}`);
     const buffer = await fs.readFile(rawPath);
-    const data = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
+    const data = await getTensorData(buffer);
     const projected = new Float32Array(data.length);
     for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
@@ -55,7 +67,7 @@ async function projectEmbedding(filename, rows, cols) {
     const rawPath = path.resolve(I7_DIR, filename);
     const targetPath = path.resolve(I7_DIR, `projected_${filename}`);
     const buffer = await fs.readFile(rawPath);
-    const data = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
+    const data = await getTensorData(buffer);
     const projected = new Float32Array(data.length);
     for (let i = 0; i < data.length; i++) {
         projected[i] = Math.tanh(data[i]) * Math.sin(0.003 * i);
@@ -68,7 +80,7 @@ async function projectWeights(filename, rows, cols) {
     const rawPath = path.resolve(I7_DIR, filename);
     const targetPath = path.resolve(I7_DIR, `projected_${filename}`);
     const buffer = await fs.readFile(rawPath);
-    const data = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
+    const data = await getTensorData(buffer);
     const projected = new Float32Array(data.length);
     for (let i = 0; i < data.length; i++) {
         projected[i] = Math.tanh(data[i]) * Math.sin(0.003 * i);
@@ -81,19 +93,19 @@ async function projectSoftmax(filename, rows, cols) {
     const rawPath = path.resolve(I7_DIR, filename);
     const targetPath = path.resolve(I7_DIR, `projected_${filename}`);
     const buffer = await fs.readFile(rawPath);
-    const data = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
+    const data = await getTensorData(buffer);
     const projected = new Float32Array(data.length);
     for (let r = 0; r < rows; r++) {
         let rowMax = -Infinity;
-        const rowOffset = r * cols;
-        for (let c = 0; c < cols; c++) rowMax = Math.max(rowMax, data[rowOffset + c]);
+        const offset = r * cols;
+        for (let c = 0; c < cols; c++) rowMax = Math.max(rowMax, data[offset + c]);
         let sum = 0;
         for (let c = 0; c < cols; c++) {
-            const exp = Math.exp(data[rowOffset + c] - rowMax);
-            projected[rowOffset + c] = exp;
+            const exp = Math.exp(data[offset + c] - rowMax);
+            projected[offset + c] = exp;
             sum += exp;
         }
-        for (let c = 0; c < cols; c++) projected[rowOffset + c] /= sum;
+        for (let c = 0; c < cols; c++) projected[offset + c] /= sum;
     }
     await fs.writeFile(targetPath, Buffer.from(projected.buffer));
     return targetPath;
