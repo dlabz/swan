@@ -1,18 +1,13 @@
 {
   "name": "swan-inference-engine",
   "version": "1.0.0",
-  "description": "Clifford Algebra Inference Engine for Qwen 2.5",
-  "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js",
+    "postinstall": "npm run install:model",
     "install:model": "node scripts/prepare-model.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
     "express": "^4.21.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
   }
 }
