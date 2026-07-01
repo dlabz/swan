@@ -9,12 +9,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+      
+      - name: Cache Model Weights
+        uses: actions/cache@v3
+        with:
+          path: ./data/model/f32
+          key: ${{ runner.os }}-qwen-weights
+
       - name: Setup Node
         uses: actions/setup-node@v3
         with: { node-version: '18' }
-      - name: Install
-        run: npm install
-      - name: Transform Model
-        run: node scripts/prepare-model.js
-      - name: Deploy
+
+      - name: Install & Transform
+        run: |
+          npm install
+          npm run install:model
+
+      - name: Deploy Artifacts
         run: echo "Model chunks ready for streaming..."
