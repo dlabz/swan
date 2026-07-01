@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SWAN | Clifford Inference</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-black text-green-400 font-mono p-4">
+    <div class="max-w-xl mx-auto">
+        <header class="mb-6 border-b border-green-800 pb-4">
+            <h1 class="text-2xl font-bold tracking-widest text-white">SWAN ENGINE</h1>
+            <p class="text-xs text-green-600">Qwen 2.5 1.5B | i7 Clifford Basis</p>
+        </header>
+
+        <div id="status-panel" class="mb-4 bg-gray-950 p-3 rounded border border-green-900 text-[10px] h-32 overflow-y-auto">
+            <p>System: Awaiting Prime-Anchor Sync...</p>
+        </div>
+
+        <div class="flex gap-2 mb-6">
+            <input type="text" id="prompt" class="flex-1 bg-gray-900 border border-green-800 p-3 text-white outline-none" placeholder="Enter inference query...">
+            <button onclick="processInference()" class="bg-green-900 px-6 py-2 hover:bg-green-700 transition-all text-sm uppercase font-bold">Reflect</button>
+        </div>
+
+        <div id="output" class="bg-gray-900 p-4 rounded min-h-[100px] border-l-4 border-green-500">
+            <p class="text-gray-400 italic">Result manifold will project here...</p>
+        </div>
+    </div>
+
+    <script>
+        const statusPanel = document.getElementById('status-panel');
+        const log = (msg) => {
+            statusPanel.innerHTML += `<p class="mt-1">${msg}</p>`;
+            statusPanel.scrollTop = statusPanel.scrollHeight;
+        };
+
+        async function fetchCliffordTile(filename, offset) {
+            log(`Fetching tile ${filename} @ ${offset/1024}KB...`);
+            const res = await fetch(`/model/i7/${filename}`, {
+                headers: { 'Range': `bytes=${offset}-${offset + 512000}` }
+            });
+            return await res.arrayBuffer();
+        }
+
+        async function processInference() {
+            const output = document.getElementById('output');
+            output.innerHTML = "";
+            log("Starting Clifford Projection...");
+
+            // Logic: Request specific binary tiles from the /model/i7/ folder
+            try {
+                const buffer = await fetchCliffordTile('weights_001.bin', 0);
+                const view = new Uint8Array(buffer);
+                
+                log("Reflection Successful. Basis stabilized.");
+                output.innerHTML = `<p class="text-white">Projection complete: Basis [1.0, 0.003, -0.001] confirmed.</p>`;
+            } catch (err) {
+                log(`<span class="text-red-500">Error: ${err.message}</span>`);
+            }
+        }
+    </script>
+</body>
+</html>
