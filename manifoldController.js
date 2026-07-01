@@ -1,35 +1,36 @@
 const fs = require('fs/promises');
 const path = require('path');
-const { hf_hub_download } = require('@huggingface/hub');
+// Import specific function to ensure API compatibility
+const { hfHubDownload } = require('@huggingface/hub');
 
-const F32_DIR = path.join(__dirname, 'data', 'f32');
 const I7_DIR = path.join(__dirname, 'data', 'i7');
 
-async function fetchAndProject(filename, repoId = "dlabz/swan") {
-    // 1. Download raw f32 weights from Hugging Face
-    const localF32Path = await hf_hub_download({
-        repo: repoId,
-        path: filename,
-        cacheDir: F32_DIR
+async function fetchAndProject(filename = "model.safetensors", repoId = "Qwen/Qwen2.5-Coder-1.5B-Instruct") {
+    console.log(`Downloading ${filename} from ${repoId}...`);
+
+    // Download the specific weight file from the Qwen repo
+    const localFilePath = await hfHubDownload({
+        repoId: repoId,
+        filename: filename,
     });
 
-    // 2. Perform Clifford i7 Basis Projection
-    const raw = await fs.readFile(localF32Path);
-    // Ensure we are working with 32-bit floats
-    const f32 = new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
-    const projected = new Float32Array(f32.length);
-
-    for (let i = 0; i < f32.length; i++) {
-        // Geometric projection logic
-        projected[i] = Math.tanh(f32[i]) * Math.sin(0.003 * i);
+    // Perform projection on the safetensors file
+    // Note: For actual model tensors, you'd normally use a library like 
+    // @huggingface/transformers or torch. This performs a simulated projection.
+    const raw = await fs.readFile(localFilePath);
+    const buffer = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
+    const view = new Float32Array(buffer);
+    
+    const projected = new Float32Array(view.length);
+    for (let i = 0; i < view.length; i++) {
+        projected[i] = Math.tanh(view[i]) * Math.sin(0.003 * i);
     }
 
-    // 3. Save to manifold folder
-    const targetPath = path.join(I7_DIR, filename);
+    const targetPath = path.join(I7_DIR, `projected_${filename}`);
     await fs.mkdir(I7_DIR, { recursive: true });
     await fs.writeFile(targetPath, Buffer.from(projected.buffer));
     
     return targetPath;
 }
 
-module.exports = { fetchAndProject, I7_DIR };
+module.exports = { fetchAndProject };
