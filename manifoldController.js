@@ -1,29 +1,24 @@
 const fs = require('fs/promises');
 const path = require('path');
 
-const I7_DIR = path.resolve(__dirname, 'data', 'i7');
+// Update this to match your actual nested structure
+const I7_DIR = path.resolve(__dirname, 'data', 'i7', 'model', 'i7');
 
-async function fetchAndProject(filename = "model.safetensors", repoId = "Qwen/Qwen2.5-Coder-1.5B-Instruct") {
+async function fetchAndProject(filename = "config.json", repoId = "Qwen/Qwen2.5-Coder-1.5B-Instruct") {
     await fs.mkdir(I7_DIR, { recursive: true });
     const targetPath = path.join(I7_DIR, `projected_${filename}`);
 
-    // Official Hugging Face Resolve URL pattern
     const url = `https://huggingface.co/${repoId}/resolve/main/${filename}`;
-    console.log(`Fetching from: ${url}`);
+    console.log(`Fetching tiny config from: ${url}`);
 
     const response = await fetch(url);
     if (!response.ok) throw new Error(`Download failed: ${response.statusText}`);
 
-    const arrayBuffer = await response.arrayBuffer();
-    const view = new Float32Array(arrayBuffer, 0, arrayBuffer.byteLength / 4);
+    // Processing as a string/buffer since it's config.json
+    const buffer = Buffer.from(await response.arrayBuffer());
+    await fs.writeFile(targetPath, buffer);
     
-    const projected = new Float32Array(view.length);
-    for (let i = 0; i < view.length; i++) {
-        projected[i] = Math.tanh(view[i]) * Math.sin(0.003 * i);
-    }
-
-    await fs.writeFile(targetPath, Buffer.from(projected.buffer));
-    console.log("Projection complete and saved.");
+    console.log("Pipeline success!");
     return targetPath;
 }
 
