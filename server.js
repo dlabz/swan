@@ -1,19 +1,59 @@
 const express = require('express');
 const fs = require('fs/promises');
 const path = require('path');
-const { processAllLayers, I7_DIR } = require('./manifoldController');
+const { downloadAndIndexModel } = require('./modelDownloader');
+const { projectAllLayers, I7_DIR } = require('./manifoldController');
 
 const app = express();
+const F32_DIR = path.resolve(__dirname, 'data/model/f32');
+
 app.use(express.static('public'));
 
-// Serve projected model files
+// 1. Dual Model Serving: Serve both raw safetensors (F32) and projected F32 (i7)
+app.use('/model/f32', express.static(F32_DIR));
 app.use('/model/i7', express.static(I7_DIR));
 
-// Check if ALL projected files exist
+// ---------------------------------------------------------
+// SERVER-SENT EVENTS (SSE) MANAGER
+// ---------------------------------------------------------
+let clients = [];
+
+function broadcast(data) {
+    clients.forEach(client => client.write(`data: ${JSON.stringify(data)}\n\n`));
+}
+
+// Hook into console to automatically broadcast logs to the frontend
+const originalLog = console.log;
+const originalError = console.error;
+
+console.log = (...args) => {
+    originalLog(...args);
+    broadcast({ type: 'log', message: args.join(' ') });
+};
+console.error = (...args) => {
+    originalError(...args);
+    broadcast({ type: 'error', message: args.join(' ') });
+};
+
+// SSE Endpoint
+app.get('/api/events', (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders(); // Establish connection immediately
+
+    clients.push(res);
+    req.on('close', () => {
+        clients = clients.filter(client => client !== res);
+    });
+});
+// ---------------------------------------------------------
+
+// Check System Readiness
 app.get('/api/check', async (req, res) => {
     try {
         const files = await fs.readdir(I7_DIR);
-        // Ensure at least the lm_head and some layers exist
+        // Ensure the projection process has reached at least the core lm_head
         const hasLmHead = files.includes('projected_lm_head.bin');
         res.json({ ready: hasLmHead });
     } catch {
@@ -21,17 +61,30 @@ app.get('/api/check', async (req, res) => {
     }
 });
 
-// Full installation: triggers batch projection of all layers
+// Start Installation Pipeline
 app.get('/api/install', async (req, res) => {
+    // Return immediately to prevent browser timeout; run process in background
+    res.json({ status: 'STARTED', message: 'Installation running. Connect to /api/events for progress.' });
+
     try {
-        console.log('Starting full model manifold projection...');
-        // processAllLayers() handles the sequence defined in MANIFEST
-        await processAllLayers(); 
-        res.json({ status: 'READY', message: 'All 28 layers projected' });
+        broadcast({ type: 'system', message: 'Starting SWAN Engine Installation Pipeline...' });
+        
+        // 1. Download and Index (Using HF Repo ID)
+        broadcast({ type: 'system', message: 'PHASE 1: Download & Indexing' });
+        await downloadAndIndexModel("Qwen/Qwen2.5-Coder-1.5B-Instruct");
+
+        // 2. Project Layers
+        broadcast({ type: 'system', message: 'PHASE 2: Manifold Projection' });
+        await projectAllLayers();
+
+        broadcast({ type: 'complete', message: 'System Ready.' });
     } catch (e) {
-        console.error('Installation error:', e);
-        res.status(500).json({ status: 'ERROR', message: e.message });
+        broadcast({ type: 'error', message: `Installation Failed: ${e.message}` });
     }
 });
 
-app.listen(3000, () => console.log('Swan Engine active on port 3000'));
+app.listen(3000, () => {
+    originalLog('Swan Engine active on port 3000');
+    originalLog(`- F32 Cache: ${F32_DIR}`);
+    originalLog(`- I7 Manifold: ${I7_DIR}`);
+});
