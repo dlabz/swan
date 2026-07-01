@@ -70,21 +70,16 @@
                 SwanUI.log("Tokenizer & Pipeline ready.");
                 
                 document.getElementById('run').onclick = async () => {
-                    // Fetch real list to resolve filename mismatch
-                    const files = await fetch('/api/files/i7').then(r => r.json());
-                    const targetName = "model.embed_tokens.weight.bin"; // Adjust if needed
-                    const actualFile = files.find(f => f.includes("embed_tokens"));
-                    
-                    if (!actualFile) {
-                        SwanUI.log("Error: Embed shard not found on server.", "error");
-                        return;
-                    }
-
-                    const path = `/model/i7/${actualFile}`;
+                    // Using the specific path identified for the embed tokens
+                    const path = '/model/i7/model.embed_tokens.weight.bin';
                     SwanUI.log(`Loading: ${path}`);
                     
-                    const file = await SwanStorage.getModelFile('embed.bin', path);
-                    SwanUI.log(`Shard Loaded: ${file.size} bytes`);
+                    try {
+                        const file = await SwanStorage.getModelFile('embed.bin', path);
+                        SwanUI.log(`Shard Loaded: ${file.size} bytes`);
+                    } catch (err) {
+                        SwanUI.log(`Fetch Error: ${err.message}`, 'error');
+                    }
                 };
             } catch (e) {
                 console.error("Bootstrap error:", e);
