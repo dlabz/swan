@@ -1,29 +1,33 @@
-
+require('express-async-errors');
 const express = require('express');
-const fs = require('fs');
+const fs = require('fs/promises');
 const path = require('path');
-const app = express();
+const { fetchAndProject, I7_DIR } = require('./manifoldController');
 
+const app = express();
 app.use(express.static('public'));
 
-app.get('/model/:type/:filename', (req, res) => {
-    const { type, filename } = req.params;
-    const filePath = path.join(__dirname, 'data', 'model', type, filename);
-    const range = req.headers.range;
+// Serve the projected manifold files
+app.use('/model/i7', express.static(I7_DIR));
 
-    if (!fs.existsSync(filePath)) return res.status(404).send("File not found");
-
-    const fileSize = fs.statSync(filePath).size;
-    const start = Number(range.replace(/\D/g, ""));
-    const end = Math.min(start + (512 * 1024), fileSize - 1);
-    
-    res.writeHead(206, {
-        "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-        "Content-Length": end - start + 1,
-        "Content-Type": "application/octet-stream"
-    });
-
-    fs.createReadStream(filePath, { start, end }).pipe(res);
+app.get('/api/check', async (req, res) => {
+    const exists = await fs.access(path.join(I7_DIR, 'weights_000.bin'))
+        .then(() => true).catch(() => false);
+    res.json({ ready: exists });
 });
 
-app.listen(3000, () => console.log('Swan Engine active on port 3000'));
+app.get('/api/install', async (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    try {
+        res.write(`data: ${JSON.stringify({ status: 'FETCHING_FROM_HF' })}\n\n`);
+        await fetchAndProject('weights_000.bin'); // Repo ID 'dlabz/swan' is hardcoded in controller
+        
+        res.write(`data: ${JSON.stringify({ status: 'READY' })}\n\n`);
+        res.end();
+    } catch (e) {
+        res.write(`data: ${JSON.stringify({ status: 'ERROR', message: e.message })}\n\n`);
+        res.end();
+    }
+});
+
+app.listen(3000, () => console.log('Swan Engine v3.0 active on port 3000'));
