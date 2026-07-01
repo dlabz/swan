@@ -40,12 +40,10 @@
         let tokenizer = null;
         
         const HIDDEN_SIZE = 1536; 
-        const FLOAT_BYTES = 4;
+        const BF16_BYTES = 2; // Real weights use 2 bytes per float!
 
         function flushLogs() {
-            if (logBuffer.length === 0) {
-                isLogging = false; return;
-            }
+            if (logBuffer.length === 0) { isLogging = false; return; }
             terminal.innerHTML += logBuffer.join('');
             logBuffer = [];
             terminal.scrollTop = terminal.scrollHeight;
@@ -55,12 +53,8 @@
         function logToTerminal(msg, type = 'log') {
             const color = type === 'error' ? 'text-red-500' : type === 'system' ? 'text-blue-400 font-bold' : 'text-green-500';
             logBuffer.push(`<div class="${color}">> ${msg}</div>`);
-            if (!isLogging) {
-                isLogging = true;
-                requestAnimationFrame(flushLogs);
-            }
-            if (type === 'error') console.error(msg);
-            else console.log(msg);
+            if (!isLogging) { isLogging = true; requestAnimationFrame(flushLogs); }
+            if (type === 'error') console.error(msg); else console.log(msg);
         }
 
         function connectSSE() {
@@ -77,7 +71,7 @@
 
         function setReady() {
             if (!tokenizer) return; 
-            statusDiv.innerText = "System Ready [I7 Manifold + Tokenizer Active]";
+            statusDiv.innerText = "System Ready [Real Weights Active]";
             statusDiv.className = "text-xs text-blue-500 font-bold";
             controls.classList.remove('hidden');
         }
@@ -98,43 +92,30 @@
                     statusDiv.innerText = "Installing: Building pipeline...";
                     await fetch('/api/install');
                 }
-            } catch(e) {
-                logToTerminal("Check failed. Retrying...", "error");
-            }
+            } catch(e) { logToTerminal("Check failed. Retrying...", "error"); }
 
             logToTerminal("Downloading Qwen BPE Tokenizer maps...", "system");
             try {
                 tokenizer = await window.AutoTokenizer.from_pretrained('Xenova/Qwen1.5-0.5B');
                 logToTerminal("Tokenizer initialized successfully.", "system");
                 setReady();
-            } catch (e) {
-                logToTerminal(`Tokenizer Error: ${e.message}`, "error");
-            }
+            } catch (e) { logToTerminal(`Tokenizer Error: ${e.message}`, "error"); }
         }
 
-        // --- SMART OPFS MANAGER ---
         async function getModelFromOPFS(filename, url) {
             const opfsRoot = await navigator.storage.getDirectory();
             let fileHandle = await opfsRoot.getFileHandle(filename, { create: true });
             let fileInfo = await fileHandle.getFile();
 
-            // 1. Get exact size
             const headRes = await fetch(url, { method: 'HEAD' });
-            const contentLength = headRes.headers.get('content-length');
-            const totalSize = contentLength ? parseInt(contentLength, 10) : 0;
+            const totalSize = parseInt(headRes.headers.get('content-length') || "0", 10);
             
-            // 2. Check Cache
-            if (fileInfo.size > 0 && (totalSize === 0 || fileInfo.size === totalSize)) {
-                return fileInfo;
-            }
+            if (fileInfo.size > 0 && (totalSize === 0 || fileInfo.size === totalSize)) return fileInfo;
 
             logToTerminal(`Downloading ${filename}...`, 'system');
             const writable = await fileHandle.createWritable();
             
-            // 3. Adaptive Download Strategy
             if (totalSize > 5 * 1024 * 1024) {
-                // Chunk massive files (e.g., embed_tokens)
-                logToTerminal(`Using Chunked Streaming for large file...`, 'system');
                 const CHUNK_SIZE = 5 * 1024 * 1024; 
                 let downloaded = 0;
                 while (downloaded < totalSize) {
@@ -145,19 +126,26 @@
                     statusDiv.innerText = `Downloading: ${(downloaded/1024/1024).toFixed(1)}MB`;
                 }
             } else {
-                // Standard stream for tiny layers (e.g., RMSNorm)
-                logToTerminal(`Using Direct Stream for small file...`, 'system');
                 const res = await fetch(url);
                 await res.body.pipeTo(writable);
             }
             
             await writable.close();
-            const finalFile = await fileHandle.getFile();
-            logToTerminal(`Saved ${filename} to OPFS (${(finalFile.size/1024).toFixed(1)} KB).`, 'system');
-            return finalFile; 
+            return await fileHandle.getFile(); 
         }
 
         // --- MATH UTILITIES ---
+        
+        // Unpacks Bfloat16 (2 bytes) into Float32 (4 bytes) by padding zeros
+        function decodeBfloat16(bf16Bytes) {
+            const f32Bytes = new Uint8Array(bf16Bytes.length * 2);
+            for (let i = 0; i < bf16Bytes.length; i += 2) {
+                f32Bytes[i * 2 + 2] = bf16Bytes[i];     // Lower BF16 byte -> FP32 Byte 2
+                f32Bytes[i * 2 + 3] = bf16Bytes[i + 1]; // Upper BF16 byte -> FP32 Byte 3
+            }
+            return new Float32Array(f32Bytes.buffer);
+        }
+
         function rmsnorm(x, weight, eps = 1e-6) {
             let sqSum = 0;
             for (let i = 0; i < x.length; i++) sqSum += x[i] * x[i];
@@ -186,14 +174,14 @@
 
                 const embedFile = await getModelFromOPFS('projected_embed_tokens.bin', '/model/i7/projected_embed_tokens.bin');
                 
-                // PHASE 2: INGEST
-                const byteOffset = lastTokenId * HIDDEN_SIZE * FLOAT_BYTES;
-                const vectorSlice = embedFile.slice(byteOffset, byteOffset + (HIDDEN_SIZE * FLOAT_BYTES));
-                let hiddenState = new Float32Array(await vectorSlice.arrayBuffer());
+                // PHASE 2: INGEST (using BF16_BYTES)
+                const byteOffset = lastTokenId * HIDDEN_SIZE * BF16_BYTES;
+                const vectorSlice = embedFile.slice(byteOffset, byteOffset + (HIDDEN_SIZE * BF16_BYTES));
                 
-                // SAFETY GUARD 1
+                const embedBytes = new Uint8Array(await vectorSlice.arrayBuffer());
+                let hiddenState = decodeBfloat16(embedBytes); // Expand to Float32
+                
                 if (Number.isNaN(hiddenState[0])) throw new Error("Extracted embedding vector contains NaN!");
-
                 logToTerminal(`[INGEST] Vector Extracted. Dim 0: ${hiddenState[0].toFixed(4)}`, 'system');
 
                 // --- PHASE 3: TRANSFORMER CORE ---
@@ -203,17 +191,16 @@
                     '/model/i7/projected_model.layers.0.input_layernorm.weight.bin'
                 );
                 
-                const normWeight = new Float32Array(await normFile.arrayBuffer());
+                const normBytes = new Uint8Array(await normFile.arrayBuffer());
+                const normWeight = decodeBfloat16(normBytes); // Expand to Float32
                 
-                // SAFETY GUARD 2
                 if (normWeight.length !== HIDDEN_SIZE) {
-                    throw new Error(`RMSNorm weight mismatch! Expected ${HIDDEN_SIZE} floats, got ${normWeight.length}. File is corrupted.`);
+                    throw new Error(`RMSNorm weight mismatch! Expected ${HIDDEN_SIZE} floats, got ${normWeight.length}.`);
                 }
 
                 hiddenState = rmsnorm(hiddenState, normWeight);
 
-                // SAFETY GUARD 3
-                if (Number.isNaN(hiddenState[0])) throw new Error("RMSNorm outputted NaN! Mathematical collapse occurred.");
+                if (Number.isNaN(hiddenState[0])) throw new Error("RMSNorm mathematical collapse (NaN)!");
 
                 logToTerminal(`[TRANSFORMER] RMSNorm applied. Dim 0 shifted to: ${hiddenState[0].toFixed(4)}`, 'system');
                 logToTerminal(`[TRANSFORMER] (Attention Block Pending Implementation...)`, 'system');
@@ -243,10 +230,12 @@
                     merged.set(leftover);
                     merged.set(value, leftover.length);
 
-                    const validLength = merged.length - (merged.length % 4);
+                    // BF16 bytes MUST be processed in multiples of 2!
+                    const validLength = merged.length - (merged.length % 2);
                     leftover = merged.slice(validLength); 
-
-                    const floats = new Float32Array(merged.buffer, merged.byteOffset, validLength / 4);
+                    
+                    const bf16Chunk = merged.slice(0, validLength);
+                    const floats = decodeBfloat16(bf16Chunk);
 
                     for(let i = 0; i < floats.length; i++) {
                         currentActivation += floats[i] * hiddenState[hiddenDimIndex];
