@@ -2,7 +2,7 @@ const fs = require('fs/promises');
 const path = require('path');
 
 // Update this to match your actual nested structure
-const I7_DIR = path.resolve(__dirname, 'data', 'i7', 'model', 'i7');
+const I7_DIR = path.resolve(__dirname, 'data', 'model', 'i7');
 
 async function fetchAndProject(filename = "config.json", repoId = "Qwen/Qwen2.5-Coder-1.5B-Instruct") {
     await fs.mkdir(I7_DIR, { recursive: true });
