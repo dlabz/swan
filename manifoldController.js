@@ -3,100 +3,72 @@ const fsPromises = require('fs/promises');
 const path = require('path');
 
 const F32_DIR = path.resolve(__dirname, 'data', 'model', 'f32');
-const META_DIR = path.resolve(__dirname, 'data', 'model', 'meta');
 const I7_DIR = path.resolve(__dirname, 'data', 'model', 'i7');
+const META_DIR = path.resolve(__dirname, 'data', 'model', 'meta');
 
-/**
- * Normalizes Hugging Face tensor names to your frontend's expected format.
- * E.g., "lm_head.weight" -> "lm_head.bin"
- */
 function normalizeName(tensorName) {
     if (tensorName === 'lm_head.weight') return 'lm_head.bin';
     if (tensorName === 'model.embed_tokens.weight') return 'embed_tokens.bin';
     return `${tensorName}.bin`;
 }
 
-/**
- * Projects all tensors dynamically using the JSON metadata index.
- * Uses random-access file reading to maintain low memory usage.
- */
+function formatSize(bytes) {
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
 async function projectAllLayers() {
     await fsPromises.mkdir(I7_DIR, { recursive: true });
-
-    // 1. Get all cached metadata files
     const metaFiles = (await fsPromises.readdir(META_DIR)).filter(f => f.endsWith('.json'));
 
-    if (metaFiles.length === 0) {
-        throw new Error("No metadata found. Please run the downloader first.");
-    }
+    if (metaFiles.length === 0) throw new Error("No metadata found.");
 
     for (const metaFile of metaFiles) {
-        const safetensorFilename = metaFile.replace('.json', '');
-        const safetensorPath = path.join(F32_DIR, safetensorFilename);
-        const metaPath = path.join(META_DIR, metaFile);
+        const safetensorPath = path.join(F32_DIR, metaFile.replace('.json', ''));
+        if (!fs.existsSync(safetensorPath)) continue;
 
-        if (!fs.existsSync(safetensorPath)) {
-            console.warn(`[Projector] Missing raw file for metadata: ${safetensorFilename}`);
-            continue;
-        }
-
-        console.log(`\n[Projector] Opening ${safetensorFilename} for projection...`);
-
-        // 2. Open file for random access
+        console.log(`\n[Extractor] Opening ${metaFile.replace('.json', '')} for extraction...`);
         const fileHandle = await fsPromises.open(safetensorPath, 'r');
         
-        // Read header size to calculate absolute offsets
         const sizeBuffer = Buffer.alloc(8);
         await fileHandle.read(sizeBuffer, 0, 8, 0);
-        const headerSize = Number(sizeBuffer.readBigUInt64LE(0));
-        const dataOffsetBase = 8 + headerSize;
+        const dataOffsetBase = 8 + Number(sizeBuffer.readBigUInt64LE(0));
 
-        // 3. Parse Metadata
-        const metadata = JSON.parse(await fsPromises.readFile(metaPath, 'utf8'));
+        const metadata = JSON.parse(await fsPromises.readFile(path.join(META_DIR, metaFile), 'utf8'));
         const tensors = Object.keys(metadata).filter(k => k !== '__metadata__');
 
-        console.log(`[Projector] Found ${tensors.length} tensors. Processing...`);
-
-        // 4. Iterate and Project Tensor-by-Tensor
         for (const tensorName of tensors) {
-            const tensorInfo = metadata[tensorName];
-            const start = dataOffsetBase + tensorInfo.data_offsets[0];
-            const end = dataOffsetBase + tensorInfo.data_offsets[1];
-            const byteLength = end - start;
+            const info = metadata[tensorName];
+            const byteLength = info.data_offsets[1] - info.data_offsets[0];
+            const targetPath = path.join(I7_DIR, `projected_${normalizeName(tensorName)}`);
 
-            const targetName = normalizeName(tensorName);
-            const targetPath = path.join(I7_DIR, `projected_${targetName}`);
-
-            // Skip if already projected
             if (fs.existsSync(targetPath)) {
-                console.log(`[Projector] Skipping (Already projected): ${targetName}`);
+                console.log(`[Extractor] Skipped: ${normalizeName(tensorName)}`);
                 continue;
             }
 
-            console.log(`[Projector] Processing: ${targetName} (${(byteLength / 1024 / 1024).toFixed(2)} MB)`);
+            console.log(`[Extractor] Processing: ${normalizeName(tensorName)} (${formatSize(byteLength)})`);
 
-            // Read exact byte chunk from disk
-            const buffer = Buffer.alloc(byteLength);
-            await fileHandle.read(buffer, 0, byteLength, start);
+            // NO DUMMY MATH: We stream the raw bfloat16 bytes directly to disk
+            const CHUNK_SIZE = 16 * 1024 * 1024; 
+            const writeStream = fs.createWriteStream(targetPath);
+            let bytesProcessed = 0;
 
-            // Safely align Float32 processing
-            const validLength = byteLength - (byteLength % 4);
-            const floats = new Float32Array(buffer.buffer, buffer.byteOffset, validLength / 4);
-            const projected = new Float32Array(floats.length);
-
-            // 5. Apply Mathematical Manifold Projection
-            for (let i = 0; i < floats.length; i++) {
-                projected[i] = Math.tanh(floats[i]) * Math.sin(0.003 * i);
+            while (bytesProcessed < byteLength) {
+                const currentChunkSize = Math.min(CHUNK_SIZE, byteLength - bytesProcessed);
+                const buffer = Buffer.alloc(currentChunkSize);
+                
+                await fileHandle.read(buffer, 0, currentChunkSize, dataOffsetBase + info.data_offsets[0] + bytesProcessed);
+                writeStream.write(buffer);
+                
+                bytesProcessed += currentChunkSize;
             }
 
-            // 6. Write to i7 storage
-            await fsPromises.writeFile(targetPath, Buffer.from(projected.buffer));
+            await new Promise(res => writeStream.end(res));
         }
-
         await fileHandle.close();
     }
-
-    console.log(`\n[Projector] All tensors successfully projected to ${I7_DIR}`);
+    console.log(`\n[Extractor] All weights successfully extracted to pure BF16 format.`);
 }
 
 module.exports = { projectAllLayers, I7_DIR };
