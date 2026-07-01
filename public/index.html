@@ -12,7 +12,7 @@
     <div class="max-w-3xl mx-auto w-full flex flex-col h-full">
         <header class="mb-4 border-b border-green-800 pb-4 shrink-0">
             <h1 class="text-2xl font-bold tracking-widest text-white">SWAN INFERENCE</h1>
-            <div id="status" class="text-xs text-yellow-500 font-bold">Checking manifold...</div>
+            <div id="status" class="text-xs text-yellow-500 font-bold">Initializing Engine...</div>
         </header>
 
         <div id="terminal" class="bg-gray-900 p-4 rounded border border-green-800 mb-4 flex-1 overflow-y-auto text-xs whitespace-pre-wrap"></div>
@@ -23,6 +23,14 @@
         </div>
     </div>
 
+    <script type="module">
+        // OPTION A: Import True BPE Tokenizer
+        import { env, AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js';
+        env.allowLocalModels = false; // Force fetching from HuggingFace Hub
+        
+        window.AutoTokenizer = AutoTokenizer; // Expose globally
+    </script>
+
     <script>
         const terminal = document.getElementById('terminal');
         const statusDiv = document.getElementById('status');
@@ -31,11 +39,15 @@
 
         let logBuffer = [];
         let isLogging = false;
+        let tokenizer = null;
+        
+        // Qwen 1.5B Architecture Specs
+        const HIDDEN_SIZE = 1536; 
+        const FLOAT_BYTES = 4;
 
         function flushLogs() {
             if (logBuffer.length === 0) {
-                isLogging = false;
-                return;
+                isLogging = false; return;
             }
             terminal.innerHTML += logBuffer.join('');
             logBuffer = [];
@@ -67,7 +79,8 @@
         }
 
         function setReady() {
-            statusDiv.innerText = "System Ready [I7 Manifold Active]";
+            if (!tokenizer) return; // Wait for tokenizer
+            statusDiv.innerText = "System Ready [I7 Manifold + Tokenizer Active]";
             statusDiv.className = "text-xs text-blue-500 font-bold";
             controls.classList.remove('hidden');
         }
@@ -79,11 +92,12 @@
 
         async function init() {
             logToTerminal("System terminal initialized...", "log");
+            
+            // 1. Initialize Server Connection
             connectSSE();
             try {
                 const res = await fetch('/api/check');
                 if ((await res.json()).ready) {
-                    setReady();
                     logToTerminal("F32 Cache & I7 Manifold Verified.", "system");
                 } else {
                     statusDiv.innerText = "Installing: Building pipeline...";
@@ -92,94 +106,82 @@
             } catch(e) {
                 logToTerminal("Check failed. Retrying...", "error");
             }
+
+            // 2. Initialize True Tokenizer
+            logToTerminal("Downloading Qwen BPE Tokenizer maps...", "system");
+            try {
+                // Xenova/Qwen1.5-0.5B shares the exact same vocab logic as 2.5
+                tokenizer = await window.AutoTokenizer.from_pretrained('Xenova/Qwen1.5-0.5B');
+                logToTerminal("Tokenizer initialized successfully.", "system");
+                setReady();
+            } catch (e) {
+                logToTerminal(`Tokenizer Error: ${e.message}`, "error");
+            }
         }
 
-        // --- EXPLICIT CHUNKED OPFS DOWNLOADER ---
+        // OPFS Storage Manager
         async function getModelFromOPFS(filename, url) {
             const opfsRoot = await navigator.storage.getDirectory();
-            
-            // 1. Get exact file size from server using HEAD request
             const headRes = await fetch(url, { method: 'HEAD' });
-            if (!headRes.ok) throw new Error(`Could not fetch metadata for ${filename}`);
+            if (!headRes.ok) throw new Error(`Could not fetch metadata`);
             const totalSize = parseInt(headRes.headers.get('content-length'), 10);
             
-            // 2. Check if we already have it fully downloaded
             let fileHandle = await opfsRoot.getFileHandle(filename, { create: true });
             let fileInfo = await fileHandle.getFile();
             
-            if (fileInfo.size === totalSize) {
-                logToTerminal(`Found complete ${filename} in OPFS storage.`, 'system');
-                return fileInfo;
-            }
+            if (fileInfo.size === totalSize) return fileInfo;
 
-            // 3. Download in strict 5MB chunks to prevent memory spikes & connection drops
-            logToTerminal(`Downloading ${filename} in chunks to bypass memory limits...`, 'system');
+            logToTerminal(`Downloading ${filename} in chunks...`, 'system');
             const writable = await fileHandle.createWritable();
-            
-            const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+            const CHUNK_SIZE = 5 * 1024 * 1024; 
             let downloaded = 0;
 
             while (downloaded < totalSize) {
                 const end = Math.min(downloaded + CHUNK_SIZE - 1, totalSize - 1);
-                
-                // Request specific byte range (HTTP 206 Partial Content)
-                const res = await fetch(url, {
-                    headers: { 'Range': `bytes=${downloaded}-${end}` }
-                });
-                
-                if (!res.ok && res.status !== 206) {
-                    throw new Error(`Chunk download failed at byte ${downloaded}`);
-                }
-
-                // Write chunk to OPFS and let garbage collector clear the memory
-                const chunkBuffer = await res.arrayBuffer();
-                await writable.write(chunkBuffer);
-                
+                const res = await fetch(url, { headers: { 'Range': `bytes=${downloaded}-${end}` } });
+                await writable.write(await res.arrayBuffer());
                 downloaded = end + 1;
-                
-                // Update UI
-                statusDiv.innerText = `Downloading: ${(downloaded / 1024 / 1024).toFixed(1)} / ${(totalSize / 1024 / 1024).toFixed(1)} MB`;
+                statusDiv.innerText = `Downloading: ${(downloaded/1024/1024).toFixed(1)}MB`;
             }
-
             await writable.close();
-            logToTerminal(`Successfully assembled and saved ${filename} to OPFS.`, 'system');
-            
             return await fileHandle.getFile(); 
         }
 
-        // --- EGRESS DECODER ---
-        function performEgress(bestTokenId, maxActivation) {
-            logToTerminal(`[EGRESS] Phase started...`, 'system');
-            logToTerminal(`- Winning Token ID: ${bestTokenId}`, 'system');
-            logToTerminal(`- Max Logit Activation: ${maxActivation.toFixed(4)}`, 'system');
-
-            const mockVocab = ["unknown", "hello", "world", "swan", "engine", "awake", "manifold", "resonance", "active", "system"];
-            const mappedWord = mockVocab[bestTokenId % mockVocab.length];
-            logToTerminal(`\nOUTPUT: "${mappedWord.toUpperCase()}"`, 'log');
-        }
-        
         async function runInference() {
             const input = document.getElementById('prompt').value;
             if (!input) return;
 
             sendBtn.disabled = true;
-            logToTerminal(`[INGEST] Input: ${input}`, 'log');
-            
-            const HIDDEN_SIZE = 1536; 
-            const hiddenState = new Float32Array(HIDDEN_SIZE);
-            const tokens = input.toLowerCase().split(' ').map(w => {
-                let hash = 0;
-                for (let i = 0; i < w.length; i++) hash = (hash << 5) - hash + w.charCodeAt(i);
-                return Math.abs(hash) % 1000;
-            });
-            for(let i=0; i < hiddenState.length; i++) {
-                hiddenState[i] = Math.tanh((tokens[i % tokens.length]) * 0.003);
-            }
+            logToTerminal(`\n[USER] ${input}`, 'log');
             
             try {
-                // Ensure the file is safely in OPFS via chunks
+                // --- PHASE 1: TRUE TOKENIZATION ---
+                const tokens = tokenizer.encode(input);
+                logToTerminal(`[TOKENIZER] BPE IDs: [${tokens.join(', ')}]`, 'system');
+                
+                // For next-token prediction, we extract the embedding of the *last* token
+                const lastTokenId = tokens[tokens.length - 1];
+
+                // Ensure file exists in OPFS
                 const file = await getModelFromOPFS('projected_embed_tokens.bin', '/model/i7/projected_embed_tokens.bin');
-                logToTerminal("[MANIFOLD] Streaming lm_head projection from OPFS...", 'system');
+                
+                // --- PHASE 2: REAL EMBEDDING LOOKUP (O(1) Disk Seek) ---
+                logToTerminal(`[INGEST] Seeking embedding vector for ID: ${lastTokenId}...`, 'system');
+                const byteOffset = lastTokenId * HIDDEN_SIZE * FLOAT_BYTES;
+                
+                // Seek directly to the row using File.slice! No loading the whole file!
+                const vectorSlice = file.slice(byteOffset, byteOffset + (HIDDEN_SIZE * FLOAT_BYTES));
+                const hiddenState = new Float32Array(await vectorSlice.arrayBuffer());
+                
+                logToTerminal(`[INGEST] Vector Extracted. Dim 0: ${hiddenState[0].toFixed(4)}`, 'system');
+
+                // --- PHASE 3: TRANSFORMER CORE SCAFFOLD ---
+                // [FUTURE WORK]: Implement RMSNorm, RoPE, and loop through model.layers.X.bin here
+                logToTerminal(`[TRANSFORMER] Bypassing hidden layers (Scaffold mode)...`, 'system');
+
+
+                // --- PHASE 4: FULL EGRESS DECODING ---
+                logToTerminal("[EGRESS] Streaming LM_Head projection from OPFS...", 'system');
 
                 const reader = file.stream().getReader();
                 let processedBytes = 0;
@@ -229,9 +231,13 @@
                     }
                 }
 
-                setReady();
-                performEgress(bestTokenId, maxActivation);
+                // Decode the winning token back to text
+                const predictedText = tokenizer.decode([bestTokenId]);
+                logToTerminal(`\n[DECODER] Max Activation: ${maxActivation.toFixed(4)}`, 'system');
+                logToTerminal(`[DECODER] Predicted ID: ${bestTokenId}`, 'system');
+                logToTerminal(`[OUTPUT] "${predictedText}"\n`, 'log');
 
+                setReady();
             } catch (e) {
                 logToTerminal(`Inference Error: ${e.message}`, 'error');
                 setReady();
@@ -240,7 +246,8 @@
             }
         }
 
-        init();
+        // Delay init slightly to ensure module script loads
+        setTimeout(init, 500);
     </script>
 </body>
 </html>
