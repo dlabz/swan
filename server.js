@@ -53,13 +53,15 @@ app.get('/api/events', (req, res) => {
 app.get('/api/check', async (req, res) => {
     try {
         const files = await fs.readdir(I7_DIR);
-        // Ensure the projection process has reached at least the core lm_head
-        const hasLmHead = files.includes('projected_lm_head.bin');
-        res.json({ ready: hasLmHead });
+        // Look for embed_tokens since Qwen uses tied weights
+        const hasCoreLayer = files.includes('projected_embed_tokens.bin');
+        res.json({ ready: hasCoreLayer });
     } catch {
         res.json({ ready: false });
     }
 });
+
+
 
 // Start Installation Pipeline
 app.get('/api/install', async (req, res) => {
