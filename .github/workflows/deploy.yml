@@ -1,0 +1,20 @@
+name: Swan Engine Pipeline
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with: { node-version: '18' }
+      - name: Install
+        run: npm install
+      - name: Transform Model
+        run: node scripts/prepare-model.js
+      - name: Deploy
+        run: echo "Model chunks ready for streaming..."
