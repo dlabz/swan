@@ -112,31 +112,49 @@
             }
         }
 
+        // --- SMART OPFS MANAGER ---
         async function getModelFromOPFS(filename, url) {
             const opfsRoot = await navigator.storage.getDirectory();
-            const headRes = await fetch(url, { method: 'HEAD' });
-            if (!headRes.ok) throw new Error(`Could not fetch metadata for ${filename}`);
-            const totalSize = parseInt(headRes.headers.get('content-length'), 10);
-            
             let fileHandle = await opfsRoot.getFileHandle(filename, { create: true });
             let fileInfo = await fileHandle.getFile();
+
+            // 1. Get exact size
+            const headRes = await fetch(url, { method: 'HEAD' });
+            const contentLength = headRes.headers.get('content-length');
+            const totalSize = contentLength ? parseInt(contentLength, 10) : 0;
             
-            if (fileInfo.size === totalSize) return fileInfo;
-
-            logToTerminal(`Downloading ${filename} in chunks...`, 'system');
-            const writable = await fileHandle.createWritable();
-            const CHUNK_SIZE = 5 * 1024 * 1024; 
-            let downloaded = 0;
-
-            while (downloaded < totalSize) {
-                const end = Math.min(downloaded + CHUNK_SIZE - 1, totalSize - 1);
-                const res = await fetch(url, { headers: { 'Range': `bytes=${downloaded}-${end}` } });
-                await writable.write(await res.arrayBuffer());
-                downloaded = end + 1;
-                statusDiv.innerText = `Downloading: ${(downloaded/1024/1024).toFixed(1)}MB`;
+            // 2. Check Cache
+            if (fileInfo.size > 0 && (totalSize === 0 || fileInfo.size === totalSize)) {
+                return fileInfo;
             }
+
+            logToTerminal(`Downloading ${filename}...`, 'system');
+            const writable = await fileHandle.createWritable();
+            
+            // 3. Adaptive Download Strategy
+            if (totalSize > 5 * 1024 * 1024) {
+                // Chunk massive files (e.g., embed_tokens)
+                logToTerminal(`Using Chunked Streaming for large file...`, 'system');
+                const CHUNK_SIZE = 5 * 1024 * 1024; 
+                let downloaded = 0;
+                while (downloaded < totalSize) {
+                    const end = Math.min(downloaded + CHUNK_SIZE - 1, totalSize - 1);
+                    const res = await fetch(url, { headers: { 'Range': `bytes=${downloaded}-${end}` } });
+                    await writable.write(await res.arrayBuffer());
+                    downloaded = end + 1;
+                    statusDiv.innerText = `Downloading: ${(downloaded/1024/1024).toFixed(1)}MB`;
+                }
+            } else {
+                // Standard stream for tiny layers (e.g., RMSNorm)
+                logToTerminal(`Using Direct Stream for small file...`, 'system');
+                const res = await fetch(url);
+                await res.body.pipeTo(writable);
+            }
+            
             await writable.close();
-            return await fileHandle.getFile(); 
+            const finalFile = await fileHandle.getFile();
+            logToTerminal(`Saved ${filename} to OPFS (${(finalFile.size/1024).toFixed(1)} KB).`, 'system');
+            return finalFile; 
         }
 
         // --- MATH UTILITIES ---
@@ -168,29 +186,36 @@
 
                 const embedFile = await getModelFromOPFS('projected_embed_tokens.bin', '/model/i7/projected_embed_tokens.bin');
                 
-                // PHASE 2: INGEST (O(1) Embedding Extraction)
+                // PHASE 2: INGEST
                 const byteOffset = lastTokenId * HIDDEN_SIZE * FLOAT_BYTES;
                 const vectorSlice = embedFile.slice(byteOffset, byteOffset + (HIDDEN_SIZE * FLOAT_BYTES));
                 let hiddenState = new Float32Array(await vectorSlice.arrayBuffer());
                 
+                // SAFETY GUARD 1
+                if (Number.isNaN(hiddenState[0])) throw new Error("Extracted embedding vector contains NaN!");
+
                 logToTerminal(`[INGEST] Vector Extracted. Dim 0: ${hiddenState[0].toFixed(4)}`, 'system');
 
                 // --- PHASE 3: TRANSFORMER CORE ---
-                
-                // 3a. RMSNorm for Layer 0
                 logToTerminal(`[TRANSFORMER] Loading Layer 0 Input RMSNorm...`, 'system');
                 const normFile = await getModelFromOPFS(
                     'projected_model.layers.0.input_layernorm.weight.bin', 
                     '/model/i7/projected_model.layers.0.input_layernorm.weight.bin'
                 );
                 
-                // It's only 6KB, we can load it entirely into RAM instantly!
                 const normWeight = new Float32Array(await normFile.arrayBuffer());
                 
-                hiddenState = rmsnorm(hiddenState, normWeight);
-                logToTerminal(`[TRANSFORMER] RMSNorm applied. Dim 0 shifted to: ${hiddenState[0].toFixed(4)}`, 'system');
+                // SAFETY GUARD 2
+                if (normWeight.length !== HIDDEN_SIZE) {
+                    throw new Error(`RMSNorm weight mismatch! Expected ${HIDDEN_SIZE} floats, got ${normWeight.length}. File is corrupted.`);
+                }
 
-                // [Next step: Load Q, K, V matrices and apply Attention]
+                hiddenState = rmsnorm(hiddenState, normWeight);
+
+                // SAFETY GUARD 3
+                if (Number.isNaN(hiddenState[0])) throw new Error("RMSNorm outputted NaN! Mathematical collapse occurred.");
+
+                logToTerminal(`[TRANSFORMER] RMSNorm applied. Dim 0 shifted to: ${hiddenState[0].toFixed(4)}`, 'system');
                 logToTerminal(`[TRANSFORMER] (Attention Block Pending Implementation...)`, 'system');
 
 
@@ -244,6 +269,8 @@
                         await new Promise(r => setTimeout(r, 0));
                     }
                 }
+
+                if (bestTokenId === -1) throw new Error("Egress failed to find a valid token activation.");
 
                 const predictedText = tokenizer.decode([bestTokenId]);
                 logToTerminal(`\n[DECODER] Max Activation: ${maxActivation.toFixed(4)}`, 'system');
