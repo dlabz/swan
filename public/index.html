@@ -25,33 +25,29 @@
     <script>
         // Automatic Pipeline Sync
         async function init() {
-            const statusDiv = document.getElementById('status');
-            const res = await fetch('/api/check');
-            const { ready } = await res.json();
+    const statusDiv = document.getElementById('status');
+    
+    // Check state
+    const res = await fetch('/api/check');
+    const { ready } = await res.json();
 
-            if (!ready) {
-                statusDiv.innerText = "Installing Manifold...";
-                const source = new EventSource('/api/install');
-                        
-                source.onerror = (e) => {
-                    console.error("SSE Connection Failed:", e);
-                    statusDiv.innerText = "Connection Failed. Check Terminal.";
-                    source.close();
-                };
-              
-                source.onmessage = (e) => {
-                    const data = JSON.parse(e.data);
-                    if (data.status === 'READY') {
-                        statusDiv.innerText = "System Ready";
-                        source.close();
-                    } else {
-                        statusDiv.innerText = data.status;
-                    }
-                };
-            } else {
+    if (!ready) {
+        statusDiv.innerText = "Installing...";
+        try {
+            const installRes = await fetch('/api/install');
+            const data = await installRes.json();
+            if (data.status === 'READY') {
                 statusDiv.innerText = "System Ready";
             }
+        } catch (e) {
+            statusDiv.innerText = "Error: " + e.message;
         }
+    } else {
+        statusDiv.innerText = "System Ready";
+    }
+}
+
+
 
         
         async function runInference() {
