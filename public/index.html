@@ -2,8 +2,6 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
-    <script>eruda.init();</script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SWAN | Inference Engine</title>
     <script src="https://cdn.tailwindcss.com"></script>
@@ -15,13 +13,11 @@
             <div id="status" class="text-xs text-yellow-500 font-bold">Checking manifold...</div>
         </header>
 
-        <div id="terminal" class="bg-gray-900 p-4 rounded border border-green-800 mb-4 flex-1 overflow-y-auto text-xs whitespace-pre-wrap">
-            <p class="text-gray-500">System terminal initialized...</p>
-        </div>
+        <div id="terminal" class="bg-gray-900 p-4 rounded border border-green-800 mb-4 flex-1 overflow-y-auto text-xs whitespace-pre-wrap"></div>
 
         <div id="controls" class="hidden flex gap-2 shrink-0">
             <input type="text" id="prompt" class="flex-1 bg-gray-900 border border-green-800 p-3 text-white outline-none" placeholder="Enter query...">
-            <button onclick="runInference()" class="bg-green-900 px-6 py-2 hover:bg-green-700 text-white font-bold transition">SEND</button>
+            <button onclick="runInference()" class="bg-green-900 px-6 py-2 hover:bg-green-700 text-white font-bold transition" id="sendBtn">SEND</button>
         </div>
     </div>
 
@@ -29,47 +25,45 @@
         const terminal = document.getElementById('terminal');
         const statusDiv = document.getElementById('status');
         const controls = document.getElementById('controls');
+        const sendBtn = document.getElementById('sendBtn');
 
         function logToTerminal(msg, type = 'log') {
-            const color = type === 'error' ? 'text-red-500' : 
-                          type === 'system' ? 'text-blue-400 font-bold' : 
-                          'text-green-500';
-            
+            const color = type === 'error' ? 'text-red-500' : type === 'system' ? 'text-blue-400 font-bold' : 'text-green-500';
             terminal.innerHTML += `<div class="${color}">> ${msg}</div>`;
             terminal.scrollTop = terminal.scrollHeight;
         }
 
         function connectSSE() {
             const evtSource = new EventSource("/api/events");
-            
             evtSource.onmessage = (event) => {
                 const data = JSON.parse(event.data);
                 logToTerminal(data.message, data.type);
-
-                if (data.type === 'complete') {
-                    statusDiv.innerText = "System Ready [I7 Manifold Active]";
-                    statusDiv.className = "text-xs text-blue-500 font-bold";
-                    controls.classList.remove('hidden');
-                } else if (data.type === 'error') {
-                    statusDiv.innerText = "System Fault";
-                    statusDiv.className = "text-xs text-red-500 font-bold";
-                }
+                if (data.type === 'complete') setReady();
+                else if (data.type === 'error') setError();
             };
         }
 
+        function setReady() {
+            statusDiv.innerText = "System Ready [I7 Manifold Active]";
+            statusDiv.className = "text-xs text-blue-500 font-bold";
+            controls.classList.remove('hidden');
+        }
+
+        function setError() {
+            statusDiv.innerText = "System Fault";
+            statusDiv.className = "text-xs text-red-500 font-bold";
+        }
+
         async function init() {
+            logToTerminal("System terminal initialized...", "log");
             connectSSE();
             const res = await fetch('/api/check');
-            const { ready } = await res.json();
-
-            if (!ready) {
+            if ((await res.json()).ready) {
+                setReady();
+                logToTerminal("F32 Cache & I7 Manifold Verified.", "system");
+            } else {
                 statusDiv.innerText = "Installing: Building pipeline...";
                 await fetch('/api/install');
-            } else {
-                statusDiv.innerText = "System Ready [I7 Manifold Active]";
-                statusDiv.className = "text-xs text-blue-500 font-bold";
-                controls.classList.remove('hidden');
-                logToTerminal("F32 Cache & I7 Manifold Verified.", "system");
             }
         }
         
@@ -77,36 +71,72 @@
             const input = document.getElementById('prompt').value;
             if (!input) return;
 
+            sendBtn.disabled = true;
             logToTerminal(`Input: ${input}`, 'log');
             
-            // Basic hash-based tokenization for testing
             const tokens = input.toLowerCase().split(' ').map(w => {
                 let hash = 0;
                 for (let i = 0; i < w.length; i++) hash = (hash << 5) - hash + w.charCodeAt(i);
-                return Math.abs(hash) % 1000; // Map to a mock vocab range
+                return Math.abs(hash) % 1000;
             });
-            
             const projection = tokens.map(t => Math.tanh(t * 0.003));
             
             try {
-                // FIXED: Fetching embed_tokens because Qwen ties lm_head to it
-                logToTerminal("Loading projected embed_tokens manifold...", 'system');
-                const res = await fetch('/model/i7/projected_embed_tokens.bin');
-                if (!res.ok) throw new Error("Could not load projected manifold (404)");
+                const modelUrl = '/model/i7/projected_embed_tokens.bin';
                 
-                const buffer = await res.arrayBuffer();
-                const validLength = buffer.byteLength - (buffer.byteLength % 4);
-                const weights = new Float32Array(buffer.slice(0, validLength));
+                // --- EXPLICIT BROWSER CACHING ---
+                const cache = await caches.open('swan-manifold-v1');
+                let res = await cache.match(modelUrl);
 
+                if (!res) {
+                    logToTerminal("Downloading manifold from server (will cache locally)...", 'system');
+                    res = await fetch(modelUrl);
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    
+                    // Clone the response: one copy goes to the persistent cache, the other is consumed below
+                    cache.put(modelUrl, res.clone());
+                } else {
+                    logToTerminal("Manifold loaded from ultra-fast browser cache.", 'system');
+                }
+                
+                const reader = res.body.getReader();
                 let prediction = 0;
-                const len = Math.min(projection.length, weights.length);
-                for(let i = 0; i < len; i++) {
-                    prediction += projection[i] * weights[i]; // Apply manifold operation
+                let processedBytes = 0;
+                let leftover = new Uint8Array(0);
+
+                logToTerminal("Streaming tensor chunks...", 'system');
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    processedBytes += value.length;
+
+                    const merged = new Uint8Array(leftover.length + value.length);
+                    merged.set(leftover);
+                    merged.set(value, leftover.length);
+
+                    const validLength = merged.length - (merged.length % 4);
+                    leftover = merged.slice(validLength); 
+
+                    const floats = new Float32Array(merged.buffer, merged.byteOffset, validLength / 4);
+
+                    for(let i = 0; i < floats.length; i++) {
+                        prediction += projection[i % projection.length] * floats[i];
+                    }
+
+                    if (processedBytes % (10 * 1024 * 1024) < 65536) {
+                        statusDiv.innerText = `Processing: ${(processedBytes / 1024 / 1024).toFixed(0)} MB...`;
+                    }
                 }
 
+                setReady(); 
                 logToTerminal(`Manifold Resonance: ${prediction.toFixed(6)}`, 'system');
             } catch (e) {
                 logToTerminal(`Inference Error: ${e.message}`, 'error');
+                setReady();
+            } finally {
+                sendBtn.disabled = false;
             }
         }
 
