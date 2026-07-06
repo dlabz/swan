@@ -1,0 +1,73 @@
+export const WGSL = {
+    RMSNorm: `
+        struct Config { dim: u32, eps: f32 }
+        @group(0) @binding(0) var<storage, read> input_vec : array<f32>;
+        @group(0) @binding(1) var<storage, read> weight_vec : array<u32>;
+        @group(0) @binding(2) var<storage, read_write> output_vec : array<f32>;
+        @group(0) @binding(3) var<uniform> config : Config;
+        @group(0) @binding(4) var<uniform> weight_scale : f32;
+
+        var<workgroup> shared_sum: array<f32, 256>;
+
+        fn unpack4xi8(packed_val: u32) -> vec4<f32> {
+            let b0 = (packed_val & 0x000000FFu);
+            let b1 = ((packed_val & 0x0000FF00u) >> 8u);
+            let b2 = ((packed_val & 0x00FF0000u) >> 16u);
+            let b3 = ((packed_val & 0xFF000000u) >> 24u);
+            var s0 = f32(b0); if (b0 >= 128u) { s0 -= 256.0; }
+            var s1 = f32(b1); if (b1 >= 128u) { s1 -= 256.0; }
+            var s2 = f32(b2); if (b2 >= 128u) { s2 -= 256.0; }
+            var s3 = f32(b3); if (b3 >= 128u) { s3 -= 256.0; }
+            return vec4<f32>(s0, s1, s2, s3);
+        }
+
+        @compute @workgroup_size(256)
+        fn main(@builtin(local_invocation_id) local_id: vec3<u32>) {
+            let tid = local_id.x;
+            let dim = config.dim;
+            
+            var local_sq_sum = 0.0;
+            for (var i = tid; i < dim; i += 256u) {
+                let val = input_vec[i];
+                local_sq_sum += val * val;
+            }
+            shared_sum[tid] = local_sq_sum;
+            workgroupBarrier();
+
+            for (var offset = 128u; offset > 0u; offset /= 2u) {
+                if (tid < offset) {
+                    shared_sum[tid] += shared_sum[tid + offset];
+                }
+                workgroupBarrier();
+            }
+
+            let sum = shared_sum[0];
+            let inv_rms = 1.0 / sqrt((sum / f32(dim)) + config.eps);
+
+            for (var i = tid; i < dim; i += 256u) {
+                let p_val = weight_vec[i / 4u];
+                let unpacked = unpack4xi8(p_val);
+                var w_val = 0.0;
+                let rem = i % 4u;
+                if (rem == 0u) { w_val = unpacked.x; }
+                else if (rem == 1u) { w_val = unpacked.y; }
+                else if (rem == 2u) { w_val = unpacked.z; }
+                else { w_val = unpacked.w; }
+                
+                output_vec[i] = input_vec[i] * inv_rms * (w_val * weight_scale);
+            }
+            workgroupBarrier();
+            if (tid == 0u) {
+                output_vec[0] = sum;
+                output_vec[1] = inv_rms;
+                output_vec[2] = input_vec[2] * inv_rms * (unpack4xi8(weight_vec[0]).z * weight_scale);
+            }
+        }
+    `,
+    EmbedLookup: ``,
+    MatMul: ``,
+    Add: ``,
+    RoPE: ``,
+    Attention: ``,
+    SiLU_Mul: ``
+};
