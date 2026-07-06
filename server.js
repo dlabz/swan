@@ -96,7 +96,7 @@ app.get('/api/events', (req, res) => {
 app.get('/api/check', async (req, res) => {
     try {
         const files = await fs.readdir(I7_DIR);
-        const hasCoreLayer = files.some(f => f.includes('model_embed_tokens'));
+        const hasCoreLayer = files.some(f => f.includes('model.embed_tokens'));
         res.json({ ready: hasCoreLayer });
     } catch {
         res.json({ ready: false });

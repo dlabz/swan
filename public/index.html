@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" class="h-full">
+<html lang="en" class="h-full antialiased">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
@@ -9,130 +9,291 @@
     <title>SWAN Engine</title>
     <script src="/vendor/tailwindcss.js"></script>
     <style>
-        body { -webkit-tap-highlight-color: transparent; }
-        #terminal { height: calc(100vh - 200px); }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { 
+            font-family: 'Inter', sans-serif;
+            -webkit-tap-highlight-color: transparent; 
+        }
+        .glass {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        /* Custom scrollbar for chat */
+        #chat-container::-webkit-scrollbar { width: 6px; }
+        #chat-container::-webkit-scrollbar-track { background: transparent; }
+        #chat-container::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 10px; }
+        .typing-cursor::after {
+            content: '▌';
+            animation: blink 1s step-start infinite;
+            color: #3b82f6;
+        }
+        @keyframes blink { 50% { opacity: 0; } }
     </style>
 </head>
-<body class="bg-black text-green-400 p-4 h-full flex flex-col">
+<body class="bg-gradient-to-br from-slate-900 via-gray-900 to-black text-slate-200 h-full flex flex-col p-4 md:p-8">
     
-    <div class="flex justify-between items-center mb-2">
-        <h1 class="text-xs font-bold uppercase tracking-widest text-green-600">Swan Manifold</h1>
-        <div id="heartbeat" class="w-2 h-2 rounded-full bg-red-600"></div>
+    <!-- Header -->
+    <div class="flex justify-between items-center mb-6 max-w-4xl w-full mx-auto">
+        <div class="flex items-center gap-3">
+            <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-purple-500 flex items-center justify-center shadow-lg shadow-blue-500/20">
+                <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+            </div>
+            <div>
+                <h1 class="text-lg font-bold tracking-wide text-white">SWAN Engine</h1>
+                <p class="text-xs text-slate-400">WebGPU Qwen2.5-1.5B-Coder</p>
+            </div>
+        </div>
+        <div class="flex items-center gap-4">
+            <div id="benchmark" class="text-xs font-mono text-slate-400 hidden bg-slate-800/50 px-3 py-1.5 rounded-full border border-slate-700">-- ms/token</div>
+            <div class="flex items-center gap-2 bg-slate-800/40 px-3 py-1.5 rounded-full border border-slate-700/50">
+                <span id="status-text" class="text-xs font-medium text-slate-400">Offline</span>
+                <div id="heartbeat" class="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)] transition-all duration-300"></div>
+            </div>
+        </div>
     </div>
 
-    <div id="terminal" class="border border-green-900 bg-gray-950 p-2 overflow-y-auto text-[10px] font-mono shadow-inner rounded-sm">
-        <div class="text-green-800">System Ready. Awaiting connection...</div>
+    <!-- Main Chat Area -->
+    <div id="chat-container" class="glass rounded-2xl flex-1 max-w-4xl w-full mx-auto overflow-y-auto p-4 md:p-6 space-y-6 shadow-2xl mb-6 flex flex-col">
+        <!-- Chat bubbles will be inserted here -->
     </div>
 
-    <div class="mt-auto pt-2 space-y-2">
-        <input id="prompt" placeholder="Input prompt..." class="w-full bg-gray-900 border border-green-800 p-3 text-white rounded-lg text-sm">
-        
-        <div class="grid grid-cols-2 gap-2">
-            <button id="run" class="bg-green-900 hover:bg-green-800 text-white font-bold py-3 rounded-lg text-xs transition-all">INFERENCE</button>
-            <button id="clear-opfs" class="bg-red-900/50 hover:bg-red-800 text-red-200 py-3 rounded-lg text-xs transition-all border border-red-800">INVALIDATE OPFS</button>
+    <!-- Input Area -->
+    <div class="max-w-4xl w-full mx-auto relative">
+        <div class="glass p-2 rounded-2xl flex items-end gap-2 focus-within:ring-2 focus-within:ring-blue-500/50 transition-all">
+            <textarea id="prompt" rows="1" placeholder="Ask SWAN anything..." class="w-full bg-transparent border-0 text-white placeholder-slate-400 focus:ring-0 resize-none p-3 text-sm max-h-32 min-h-[44px]" oninput="this.style.height = ''; this.style.height = this.scrollHeight + 'px'"></textarea>
+            
+            <div class="flex flex-col gap-2 p-1">
+                <button id="run" disabled class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white p-2.5 rounded-xl transition-all shadow-lg shadow-blue-500/25 flex-shrink-0 group">
+                    <svg class="w-5 h-5 group-hover:translate-x-0.5 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7"></path></svg>
+                </button>
+            </div>
+        </div>
+        <div class="mt-3 flex justify-between items-center px-2">
+            <button id="clear-opfs" class="text-xs text-slate-500 hover:text-red-400 transition-colors flex items-center gap-1">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                Clear OPFS Cache
+            </button>
+            <div class="text-xs text-slate-500">Fully local AI processing</div>
         </div>
     </div>
 
     <script type="module">
-        import { SwanPipeline, SwanUI, SwanStorage } from './js/swan.js';
-        import { SwanMathEngine } from './js/swanMath.js';
+        import { SwanPipeline, SwanUI, SwanStorage } from './js/swan.js?v=2';
+        import { SwanMathEngine } from './js/swanMath.js?v=2';
         import { env, AutoTokenizer } from './vendor/transformers.min.js';
 
-        // SSE Log Integration
         const eventSource = new EventSource('/api/events');
-        const terminal = document.getElementById('terminal');
+        const chatContainer = document.getElementById('chat-container');
         const heartbeat = document.getElementById('heartbeat');
+        const statusText = document.getElementById('status-text');
+        const runBtn = document.getElementById('run');
+        const promptInput = document.getElementById('prompt');
+        const benchmarkLabel = document.getElementById('benchmark');
+
+        function setStatus(state) {
+            heartbeat.className = "w-2 h-2 rounded-full transition-all duration-300";
+            
+            if (state === 'offline') {
+                statusText.textContent = 'Offline';
+                statusText.className = 'text-xs font-medium text-slate-400';
+                heartbeat.classList.add('bg-red-500', 'shadow-[0_0_8px_rgba(239,68,68,0.5)]');
+            } else if (state === 'loading') {
+                statusText.textContent = 'Loading';
+                statusText.className = 'text-xs font-medium text-amber-400';
+                heartbeat.classList.add('bg-amber-500', 'shadow-[0_0_8px_rgba(245,158,11,0.5)]', 'animate-pulse');
+            } else if (state === 'ready') {
+                statusText.textContent = 'Ready';
+                statusText.className = 'text-xs font-medium text-emerald-400';
+                heartbeat.classList.add('bg-emerald-500', 'shadow-[0_0_8px_rgba(16,185,129,0.5)]');
+            } else if (state === 'generating') {
+                statusText.textContent = 'Generating';
+                statusText.className = 'text-xs font-medium text-sky-400';
+                heartbeat.classList.add('bg-sky-500', 'shadow-[0_0_8px_rgba(14,165,233,0.5)]', 'animate-pulse');
+            } else if (state === 'error') {
+                statusText.textContent = 'Error';
+                statusText.className = 'text-xs font-medium text-red-500';
+                heartbeat.classList.add('bg-red-500', 'shadow-[0_0_8px_rgba(239,68,68,0.5)]');
+            }
+        }
+
+        function appendMessage(role, content) {
+            const wrapper = document.createElement('div');
+            wrapper.className = `flex ${role === 'user' ? 'justify-end' : 'justify-start'}`;
+            
+            const bubble = document.createElement('div');
+            const baseClasses = 'px-5 py-3.5 max-w-[85%] shadow-md rounded-2xl text-sm leading-relaxed';
+            if (role === 'user') {
+                bubble.className = `${baseClasses} bg-blue-600 text-white rounded-tr-sm`;
+            } else if (role === 'error') {
+                bubble.className = `${baseClasses} bg-red-900/80 text-red-100 rounded-tl-sm border border-red-700 whitespace-pre-wrap`;
+            } else if (role === 'system') {
+                bubble.className = `${baseClasses} bg-slate-800/50 text-slate-400 rounded-tl-sm border border-slate-700/50 italic text-xs`;
+            } else {
+                bubble.className = `${baseClasses} bg-slate-800/80 text-slate-200 rounded-tl-sm border border-slate-700 whitespace-pre-wrap`;
+            }
+
+            bubble.textContent = content;
+            wrapper.appendChild(bubble);
+            chatContainer.appendChild(wrapper);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            return bubble;
+        }
+
+        let isModelReady = false;
+
+        eventSource.onopen = () => {
+            if (!isModelReady) {
+                setStatus('loading');
+            } else {
+                setStatus('ready');
+            }
+        };
+
+        eventSource.onerror = () => {
+            setStatus('offline');
+        };
 
         eventSource.onmessage = (e) => {
             const data = JSON.parse(e.data);
-            const entry = document.createElement('div');
-            entry.className = data.type === 'error' ? 'text-red-400' : 'text-green-300';
-            entry.textContent = `> ${data.message}`;
-            terminal.prepend(entry);
-            heartbeat.classList.replace('bg-red-600', 'bg-green-500');
-            setTimeout(() => heartbeat.classList.replace('bg-green-500', 'bg-red-600'), 1000);
+            
+            // Always show GPU errors/OOM, even after model is ready
+            if (data.type === 'error') {
+                appendMessage('error', `[Server] ${data.message}`);
+                setStatus('error');
+            }
         };
 
-        // OPFS Invalidation
         document.getElementById('clear-opfs').onclick = async () => {
             if (confirm("Clear all local storage shards?")) {
                 const root = await navigator.storage.getDirectory();
                 for await (const name of root.keys()) {
                     await root.removeEntry(name, { recursive: true });
                 }
-                SwanUI.log("OPFS Invalidated.");
+                appendMessage('system', "OPFS Cache Invalidated.");
             }
         };
 
+        promptInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                if (!runBtn.disabled) runBtn.click();
+            }
+        });
+
         async function bootstrap() {
             try {
+                // Initialize token UI
+                SwanUI.log = (msg, type) => {
+                    // System logs are disabled in chat to reduce padding. 
+                    // Use the status light instead.
+                };
+
                 await SwanPipeline.ensureReady(SwanUI);
                 
-                // Configure transformers to load only local files
                 env.allowRemoteModels = false;
-                env.allowLocalModels = false; // "local" means Node.js fs, we use URLs instead
-                const tokenizer = await AutoTokenizer.from_pretrained('/model/tokenizer/');
-                
-                SwanUI.log("Tokenizer & Pipeline ready.");
+                env.allowLocalModels = true;
+                env.localModelPath = '/';
+                const tokenizer = await AutoTokenizer.from_pretrained('model/tokenizer/');
                 
                 const mathEngine = new SwanMathEngine(SwanUI);
                 await mathEngine.init();
 
                 await mathEngine.loadAllWeights((current, total) => {
-                    if (current % 4 === 0) {
-                        SwanUI.log(`Loading layer ${current}/${total}...`, "system");
-                    }
+                    // Silent loading
                 });
 
-                document.getElementById('run').onclick = async () => {
-                    const prompt = document.getElementById('prompt').value || "Hello, world!";
-                    SwanUI.log(`Tokenizing prompt: "${prompt}"`);
-                    const tokens = await tokenizer(prompt);
-                    const tokenIds = tokens.input_ids.data;
-                    SwanUI.log(`Tokens: [${tokenIds.join(', ')}]`);
+                isModelReady = true;
+                runBtn.disabled = false;
+                setStatus('ready');
+
+                runBtn.onclick = async () => {
+                    const prompt = promptInput.value.trim();
+                    if (!prompt) return;
+
+                    promptInput.value = '';
+                    promptInput.style.height = '';
                     
-                    let generatedTokens = [];
-                    let maxTokens = 20;
+                    appendMessage('user', prompt);
+                    runBtn.disabled = true;
+                    promptInput.disabled = true;
+                    benchmarkLabel.classList.add('hidden');
+                    setStatus('generating');
+                    
+                    // Qwen format
+                    const systemPrompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+                    
+                    const tokens = await tokenizer(systemPrompt);
+                    const tokenIds = tokens.input_ids.data;
+                    
+                    let maxTokens = 256;
                     
                     try {
-                        SwanUI.log(`Processing prompt to build KV cache...`);
+                        const pStart = performance.now();
                         let currentPos = 0;
-                        for (let i = 0; i < tokenIds.length - 1; i++) {
-                            await mathEngine.forward(Number(tokenIds[i]), currentPos);
-                            currentPos++;
+                        const promptTokens = Array.from(tokenIds).map(Number);
+                        
+                        // We must chunk the prompt if it exceeds maxPrefillLen!
+                        let currentToken;
+                        const maxChunk = 512;
+                        for (let i = 0; i < promptTokens.length; i += maxChunk) {
+                            const chunk = promptTokens.slice(i, i + maxChunk);
+                            currentToken = await mathEngine.forwardSequence(chunk, currentPos);
+                            currentPos += chunk.length;
                         }
+
+                        const pEnd = performance.now();
+                        console.log(`Prompt processed in ${Math.round(pEnd - pStart)}ms`);
                         
-                        let currentToken = Number(tokenIds[tokenIds.length - 1]);
+                        const streamBubble = appendMessage('assistant', '');
+                        streamBubble.classList.add('typing-cursor');
+                        let fullText = "";
                         
+                        let totalTokens = 0;
+                        const tStart = performance.now();
+
                         for (let step = 0; step < maxTokens; step++) {
-                            // Run the full WebGPU forward pass
-                            const bestToken = await mathEngine.forward(currentToken, currentPos);
-                            
-                            generatedTokens.push(bestToken);
-                            currentToken = bestToken;
-                            currentPos++;
-                            
-                            const decoded = await tokenizer.decode([bestToken]);
-                            SwanUI.log(`[Step ${step+1}] ID: ${bestToken} -> "${decoded}"`, "system");
-                            
-                            if (bestToken === 151643 || bestToken === 151645) {
-                                SwanUI.log("Generation finished (EOS token reached).", "system");
+                            if (currentToken === 151643 || currentToken === 151645) { // EOS tokens for Qwen
                                 break;
                             }
                             
-                            await new Promise(r => setTimeout(r, 1));
+                            totalTokens++;
+                            const decoded = await tokenizer.decode([currentToken]);
+                            fullText += decoded;
+                            streamBubble.textContent = fullText;
+                            
+                            chatContainer.scrollTop = chatContainer.scrollHeight;
+                            
+                            currentToken = await mathEngine.forwardSequence([currentToken], currentPos);
+                            currentPos++;
                         }
                         
-                        const fullDecoded = await tokenizer.decode(generatedTokens);
-                        SwanUI.log(`Final sequence: "${fullDecoded}"`);
+                        const tEnd = performance.now();
+                        streamBubble.classList.remove('typing-cursor');
+                        
+                        if (totalTokens > 0) {
+                            const msPerToken = ((tEnd - tStart) / totalTokens).toFixed(1);
+                            benchmarkLabel.textContent = `${msPerToken} ms/token`;
+                            benchmarkLabel.classList.remove('hidden');
+                        }
                         
                     } catch (err) {
-                        SwanUI.log(`Inference Error: ${err.message}`, 'error');
+                        appendMessage('error', `Inference Error: ${err.message}`);
+                        setStatus('error');
+                    } finally {
+                        runBtn.disabled = false;
+                        promptInput.disabled = false;
+                        promptInput.focus();
+                        if (statusText.textContent === 'Generating') {
+                            setStatus('ready');
+                        }
                     }
                 };
             } catch (e) {
                 console.error("Bootstrap error:", e);
-                terminal.prepend(document.createElement('div').textContent = `ERR: ${e.message}`);
+                appendMessage('error', `Bootstrap failed: ${e.message}`);
+                setStatus('error');
             }
         }
         bootstrap();

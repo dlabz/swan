@@ -19,21 +19,24 @@ export const WGSL = {
     EmbedLookup: `
         struct Config {
             dim: u32,
-            token_id: u32,
+            seq_len: u32,
         }
         @group(0) @binding(0) var<storage, read> embed_matrix : array<u32>;
-        @group(0) @binding(1) var<storage, read_write> output_vec : array<f32>;
-        @group(0) @binding(2) var<uniform> config : Config;
-        @group(0) @binding(3) var<uniform> scale : f32;
+        @group(0) @binding(1) var<storage, read_write> output_matrix : array<f32>;
+        @group(0) @binding(2) var<storage, read> tokens : array<u32>;
+        @group(0) @binding(3) var<uniform> config : Config;
+        @group(0) @binding(4) var<uniform> scale : f32;
 
         ${UNPACK_I8_FN}
 
-        @compute @workgroup_size(64)
+        @compute @workgroup_size(64, 1, 1)
         fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let idx = global_id.x;
-            if (idx >= config.dim) { return; }
+            let tok_idx = global_id.y;
+            if (idx >= config.dim || tok_idx >= config.seq_len) { return; }
             
-            let u32_idx = (config.token_id * config.dim / 4u) + (idx / 4u);
+            let token_id = tokens[tok_idx];
+            let u32_idx = (token_id * config.dim / 4u) + (idx / 4u);
             let val_u32 = embed_matrix[u32_idx];
             
             let unpacked = unpack4xi8(val_u32);
@@ -44,7 +47,7 @@ export const WGSL = {
             else if (rem == 2u) { w_val = unpacked.z; }
             else { w_val = unpacked.w; }
             
-            output_vec[idx] = w_val * scale;
+            output_matrix[tok_idx * config.dim + idx] = w_val * scale;
         }
     `,
 
@@ -52,10 +55,11 @@ export const WGSL = {
         struct Config {
             dim: u32,
             eps: f32,
+            seq_len: u32,
         }
-        @group(0) @binding(0) var<storage, read> input_vec : array<f32>;
+        @group(0) @binding(0) var<storage, read> input_matrix : array<f32>;
         @group(0) @binding(1) var<storage, read> weight_vec : array<u32>;
-        @group(0) @binding(2) var<storage, read_write> output_vec : array<f32>;
+        @group(0) @binding(2) var<storage, read_write> output_matrix : array<f32>;
         @group(0) @binding(3) var<uniform> config : Config;
         @group(0) @binding(4) var<uniform> weight_scale : f32;
 
@@ -63,14 +67,18 @@ export const WGSL = {
 
         var<workgroup> shared_sum: array<f32, 256>;
 
-        @compute @workgroup_size(256)
-        fn main(@builtin(local_invocation_id) local_id: vec3<u32>) {
+        @compute @workgroup_size(256, 1, 1)
+        fn main(@builtin(local_invocation_id) local_id: vec3<u32>, @builtin(workgroup_id) group_id: vec3<u32>) {
             let dim = config.dim;
             let tid = local_id.x;
+            let tok_idx = group_id.y;
+            if (tok_idx >= config.seq_len) { return; }
+            
+            let row_offset = tok_idx * dim;
             
             var local_sq_sum = 0.0;
             for (var i = tid; i < dim; i += 256u) {
-                let val = input_vec[i];
+                let val = input_matrix[row_offset + i];
                 local_sq_sum += val * val;
             }
             shared_sum[tid] = local_sq_sum;
@@ -95,7 +103,7 @@ export const WGSL = {
                 else if (rem == 2u) { w_val = unpacked.z; }
                 else { w_val = unpacked.w; }
                 
-                output_vec[i] = input_vec[i] * inv_rms * (w_val * weight_scale);
+                output_matrix[row_offset + i] = input_matrix[row_offset + i] * inv_rms * (w_val * weight_scale);
             }
         }
     `,
@@ -104,59 +112,80 @@ export const WGSL = {
         struct Config {
             in_dim: u32,
             out_dim: u32,
+            seq_len: u32,
         }
-        @group(0) @binding(0) var<storage, read> input_vec : array<f32>;
+        @group(0) @binding(0) var<storage, read> input_matrix : array<f32>;
         @group(0) @binding(1) var<storage, read> weight_matrix : array<u32>;
         @group(0) @binding(2) var<storage, read> bias_vec : array<u32>;
-        @group(0) @binding(3) var<storage, read_write> output_vec : array<f32>;
+        @group(0) @binding(3) var<storage, read_write> output_matrix : array<f32>;
         @group(0) @binding(4) var<uniform> config : Config;
         @group(0) @binding(5) var<uniform> scales : vec2<f32>; // x = weight_scale, y = bias_scale
         @group(0) @binding(6) var<uniform> has_bias : u32;
 
         ${UNPACK_I8_FN}
 
-        @compute @workgroup_size(64)
+        @compute @workgroup_size(64, 1, 1)
         fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let out_idx = global_id.x;
             if (out_idx >= config.out_dim) { return; }
 
-            var sum = 0.0;
             let in_dim = config.in_dim;
+            let seq_len = config.seq_len;
             let row_start_u32 = (out_idx * in_dim) / 4u;
             let u32_count = in_dim / 4u;
 
-            for (var i = 0u; i < u32_count; i++) {
-                let p_val = weight_matrix[row_start_u32 + i];
-                let unpacked = unpack4xi8(p_val);
-                
-                let in_base = i * 4u;
-                sum += unpacked.x * input_vec[in_base];
-                sum += unpacked.y * input_vec[in_base + 1u];
-                sum += unpacked.z * input_vec[in_base + 2u];
-                sum += unpacked.w * input_vec[in_base + 3u];
-            }
+            let CHUNK_SIZE = 32u;
             
-            sum *= scales.x;
-
-            if (has_bias == 1u) {
-                let b_idx_u32 = out_idx / 4u;
-                let rem = out_idx % 4u;
-                let b_val = bias_vec[b_idx_u32];
-                let b_unpacked = unpack4xi8(b_val);
+            for (var t_start = 0u; t_start < seq_len; t_start += CHUNK_SIZE) {
+                var sums : array<f32, 32>;
+                for (var c = 0u; c < CHUNK_SIZE; c++) {
+                    sums[c] = 0.0;
+                }
+                
+                let cur_chunk = select(CHUNK_SIZE, seq_len - t_start, t_start + CHUNK_SIZE > seq_len);
+                
+                for (var i = 0u; i < u32_count; i++) {
+                    let p_val = weight_matrix[row_start_u32 + i];
+                    let unpacked = unpack4xi8(p_val);
+                    
+                    for (var c = 0u; c < CHUNK_SIZE; c++) {
+                        if (c >= cur_chunk) { break; }
+                        let tok_idx = t_start + c;
+                        let in_base = tok_idx * in_dim + (i * 4u);
+                        sums[c] += unpacked.x * input_matrix[in_base];
+                        sums[c] += unpacked.y * input_matrix[in_base + 1u];
+                        sums[c] += unpacked.z * input_matrix[in_base + 2u];
+                        sums[c] += unpacked.w * input_matrix[in_base + 3u];
+                    }
+                }
+                
                 var bias = 0.0;
-                if (rem == 0u) { bias = b_unpacked.x; }
-                else if (rem == 1u) { bias = b_unpacked.y; }
-                else if (rem == 2u) { bias = b_unpacked.z; }
-                else { bias = b_unpacked.w; }
-                sum += bias * scales.y;
-            }
+                if (has_bias == 1u) {
+                    let b_idx_u32 = out_idx / 4u;
+                    let rem = out_idx % 4u;
+                    let b_val = bias_vec[b_idx_u32];
+                    let b_unpacked = unpack4xi8(b_val);
+                    if (rem == 0u) { bias = b_unpacked.x; }
+                    else if (rem == 1u) { bias = b_unpacked.y; }
+                    else if (rem == 2u) { bias = b_unpacked.z; }
+                    else { bias = b_unpacked.w; }
+                    bias *= scales.y;
+                }
 
-            output_vec[out_idx] = sum;
+                for (var c = 0u; c < CHUNK_SIZE; c++) {
+                    if (c >= cur_chunk) { break; }
+                    let tok_idx = t_start + c;
+                    output_matrix[tok_idx * config.out_dim + out_idx] = sums[c] * scales.x + bias;
+                }
+            }
         }
     `,
 
     Add: `
-        struct Config { dim: u32 }
+        struct Config { 
+            dim: u32,
+            seq_len: u32,
+        }
         @group(0) @binding(0) var<storage, read_write> target_vec : array<f32>;
         @group(0) @binding(1) var<storage, read> add_vec : array<f32>;
         @group(0) @binding(2) var<uniform> config : Config;
@@ -164,13 +193,16 @@ export const WGSL = {
         @compute @workgroup_size(256)
         fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let i = global_id.x;
-            if (i >= config.dim) { return; }
+            if (i >= config.dim * config.seq_len) { return; }
             target_vec[i] += add_vec[i];
         }
     `,
 
     SiLU_Mul: `
-        struct Config { dim: u32 }
+        struct Config { 
+            dim: u32,
+            seq_len: u32,
+        }
         @group(0) @binding(0) var<storage, read_write> gate_vec : array<f32>;
         @group(0) @binding(1) var<storage, read> up_vec : array<f32>;
         @group(0) @binding(2) var<uniform> config : Config;
@@ -178,7 +210,7 @@ export const WGSL = {
         @compute @workgroup_size(256)
         fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let i = global_id.x;
-            if (i >= config.dim) { return; }
+            if (i >= config.dim * config.seq_len) { return; }
             let x = gate_vec[i];
             let silu = x / (1.0 + exp(-x));
             gate_vec[i] = silu * up_vec[i];
@@ -189,36 +221,74 @@ export const WGSL = {
         struct Config {
             dim: u32,
             head_dim: u32,
-            pos: u32,
+            base_pos: u32,
             base: f32,
+            seq_len: u32,
         }
-        @group(0) @binding(0) var<storage, read_write> q_vec : array<f32>;
-        @group(0) @binding(1) var<storage, read_write> k_vec : array<f32>;
+        @group(0) @binding(0) var<storage, read_write> q_matrix : array<f32>;
+        @group(0) @binding(1) var<storage, read_write> k_matrix : array<f32>;
         @group(0) @binding(2) var<uniform> config : Config;
 
-        @compute @workgroup_size(64)
+        @compute @workgroup_size(64, 1, 1)
         fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-            let i = global_id.x * 2u;
-            if (i >= config.dim) { return; }
+            let i = global_id.x;
+            let tok_idx = global_id.y;
+            if (i >= config.dim / 2u || tok_idx >= config.seq_len) { return; }
 
+            let pos = config.base_pos + tok_idx;
             let head_dim = config.head_dim;
-            let head_idx = i % head_dim;
+            let half_dim = head_dim / 2u;
             
-            let freq = f32(config.pos) / pow(config.base, f32(head_idx) / f32(head_dim));
+            let head_idx = i / half_dim;
+            let d = i % half_dim;
+            
+            let exponent = f32(d * 2u) / f32(head_dim);
+            let freq = f32(pos) / pow(config.base, exponent);
             let cos_val = cos(freq);
             let sin_val = sin(freq);
 
-            let q0 = q_vec[i];
-            let q1 = q_vec[i + 1u];
-            q_vec[i] = q0 * cos_val - q1 * sin_val;
-            q_vec[i + 1u] = q0 * sin_val + q1 * cos_val;
+            let q_row_offset = tok_idx * config.dim;
+            let q_offset = q_row_offset + (head_idx * head_dim);
+            let q0 = q_matrix[q_offset + d];
+            let q1 = q_matrix[q_offset + d + half_dim];
+            q_matrix[q_offset + d] = q0 * cos_val - q1 * sin_val;
+            q_matrix[q_offset + d + half_dim] = q0 * sin_val + q1 * cos_val;
 
-            if (i < 256u) {
-                let k0 = k_vec[i];
-                let k1 = k_vec[i + 1u];
-                k_vec[i] = k0 * cos_val - k1 * sin_val;
-                k_vec[i + 1u] = k0 * sin_val + k1 * cos_val;
+            // K matrix has 256 dim
+            if (i < 128u) {
+                let k_row_offset = tok_idx * 256u;
+                let kv_head_idx = i / half_dim;
+                let k_offset = k_row_offset + (kv_head_idx * head_dim);
+                
+                let k0 = k_matrix[k_offset + d];
+                let k1 = k_matrix[k_offset + d + half_dim];
+                k_matrix[k_offset + d] = k0 * cos_val - k1 * sin_val;
+                k_matrix[k_offset + d + half_dim] = k0 * sin_val + k1 * cos_val;
             }
+        }
+    `,
+
+    WriteCache: `
+        struct Config {
+            kv_dim: u32,
+            base_pos: u32,
+            seq_len: u32,
+            max_seq_len: u32,
+        }
+        @group(0) @binding(0) var<storage, read> src : array<f32>;
+        @group(0) @binding(1) var<storage, read_write> dst : array<f32>;
+        @group(0) @binding(2) var<uniform> config : Config;
+        
+        @compute @workgroup_size(64, 1, 1)
+        fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+            let i = global_id.x;
+            let tok_idx = global_id.y;
+            if (i >= config.kv_dim || tok_idx >= config.seq_len) { return; }
+            
+            let pos = (config.base_pos + tok_idx) % config.max_seq_len;
+            let dst_offset = pos * config.kv_dim + i;
+            let src_offset = tok_idx * config.kv_dim + i;
+            dst[dst_offset] = src[src_offset];
         }
     `,
 
@@ -227,74 +297,78 @@ export const WGSL = {
             num_heads: u32,
             kv_heads: u32,
             head_dim: u32,
-            pos: u32,
+            base_pos: u32,
+            seq_len: u32,
         }
-        @group(0) @binding(0) var<storage, read> q_vec : array<f32>;
-        @group(0) @binding(1) var<storage, read_write> k_cache : array<f32>;
-        @group(0) @binding(2) var<storage, read_write> v_cache : array<f32>;
-        @group(0) @binding(3) var<storage, read_write> out_vec : array<f32>;
-        @group(0) @binding(4) var<storage, read> k_new : array<f32>;
-        @group(0) @binding(5) var<storage, read> v_new : array<f32>;
-        @group(0) @binding(6) var<uniform> config : Config;
+        @group(0) @binding(0) var<storage, read> q_matrix : array<f32>;
+        @group(0) @binding(1) var<storage, read> k_cache : array<f32>;
+        @group(0) @binding(2) var<storage, read> v_cache : array<f32>;
+        @group(0) @binding(3) var<storage, read_write> out_matrix : array<f32>;
+        @group(0) @binding(4) var<uniform> config : Config;
 
-        @compute @workgroup_size(12)
+        @compute @workgroup_size(12, 1, 1)
         fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let head = global_id.x;
-            let isActive = head < config.num_heads;
+            let q_tok_idx = global_id.y;
+            
+            if (head >= config.num_heads || q_tok_idx >= config.seq_len) { return; }
             
             let head_dim = config.head_dim;
             let kv_heads = config.kv_heads;
-            let pos = config.pos;
+            let base_pos = config.base_pos;
             let kv_head = head / (config.num_heads / kv_heads);
+            let maxSeqLen = 512u;
             
-            if (isActive && head < kv_heads) {
-                let cache_offset = pos * kv_heads * head_dim + head * head_dim;
-                let new_offset = head * head_dim;
-                for (var i = 0u; i < head_dim; i++) {
-                    k_cache[cache_offset + i] = k_new[new_offset + i];
-                    v_cache[cache_offset + i] = v_new[new_offset + i];
+            var scores : array<f32, 512>;
+            let q_row_offset = q_tok_idx * config.num_heads * head_dim;
+            let q_offset = q_row_offset + (head * head_dim);
+            let scale = 1.0 / sqrt(f32(head_dim));
+            
+            var max_score = -1e20;
+            let abs_pos = base_pos + q_tok_idx;
+            let context_len = select(abs_pos + 1u, maxSeqLen, abs_pos >= maxSeqLen);
+            
+            for (var t_idx = 0u; t_idx < context_len; t_idx++) {
+                var start_T = 0u;
+                if (abs_pos >= maxSeqLen) {
+                    start_T = abs_pos - maxSeqLen + 1u;
                 }
+                let T = start_T + t_idx;
+                let cache_pos = T % maxSeqLen;
+                
+                var dot = 0.0;
+                let k_offset = cache_pos * kv_heads * head_dim + kv_head * head_dim;
+                for (var i = 0u; i < head_dim; i++) {
+                    dot += q_matrix[q_offset + i] * k_cache[k_offset + i];
+                }
+                let score = dot * scale;
+                scores[t_idx] = score;
+                if (score > max_score) { max_score = score; }
             }
             
-            workgroupBarrier();
+            var sum_exp = 0.0;
+            for (var t_idx = 0u; t_idx < context_len; t_idx++) {
+                let exp_val = exp(scores[t_idx] - max_score);
+                scores[t_idx] = exp_val;
+                sum_exp += exp_val;
+            }
             
-            if (isActive) {
-                var scores : array<f32, 512>;
-                if (pos < 512u) {
-                    let q_offset = head * head_dim;
-                    let scale = 1.0 / sqrt(f32(head_dim));
-                    
-                    var max_score = -1e20;
-                    for (var t = 0u; t <= pos; t++) {
-                        var dot = 0.0;
-                        let k_offset = t * kv_heads * head_dim + kv_head * head_dim;
-                        for (var i = 0u; i < head_dim; i++) {
-                            dot += q_vec[q_offset + i] * k_cache[k_offset + i];
-                        }
-                        let score = dot * scale;
-                        scores[t] = score;
-                        if (score > max_score) {
-                            max_score = score;
-                        }
-                    }
-                    
-                    var sum_exp = 0.0;
-                    for (var t = 0u; t <= pos; t++) {
-                        let exp_val = exp(scores[t] - max_score);
-                        scores[t] = exp_val;
-                        sum_exp += exp_val;
-                    }
-                    
-                    let out_offset = head * head_dim;
-                    for (var i = 0u; i < head_dim; i++) {
-                        var val = 0.0;
-                        for (var t = 0u; t <= pos; t++) {
-                            let v_offset = t * kv_heads * head_dim + kv_head * head_dim;
-                            val += (scores[t] / sum_exp) * v_cache[v_offset + i];
-                        }
-                        out_vec[out_offset + i] = val;
-                    }
+            let out_row_offset = q_tok_idx * config.num_heads * head_dim;
+            let out_offset = out_row_offset + (head * head_dim);
+            
+            for (var i = 0u; i < head_dim; i++) {
+                var val = 0.0;
+                var start_T = 0u;
+                if (abs_pos >= maxSeqLen) {
+                    start_T = abs_pos - maxSeqLen + 1u;
                 }
+                for (var t_idx = 0u; t_idx < context_len; t_idx++) {
+                    let T = start_T + t_idx;
+                    let cache_pos = T % maxSeqLen;
+                    let v_offset = cache_pos * kv_heads * head_dim + kv_head * head_dim;
+                    val += (scores[t_idx] / sum_exp) * v_cache[v_offset + i];
+                }
+                out_matrix[out_offset + i] = val;
             }
         }
     `
