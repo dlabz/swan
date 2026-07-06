@@ -1,15 +1,14 @@
-// @ts-check
 const fs = require('fs');
 const fsPromises = require('fs/promises');
 const path = require('path');
-const { bf16ToFloat32Array, quantizeToI7 } = require('./manifoldMath');
+const { encodeBF16To5Cell8Bit } = require('./manifoldMath');
 
 const I7_DIR = path.resolve(__dirname, 'data/model/i7');
 const META_DIR = path.resolve(__dirname, 'data/model/meta');
 
 /**
- * Projects monolith safetensors into granular I7 manifold shards.
- * Uses strict offset arithmetic to prevent BFloat16/Float32 alignment drift.
+ * Projects monolith safetensors into granular 5-Cell 8-bit manifold shards.
+ * Uses 2-pass memory-bounded streaming to calculate exact tensor scaling.
  * @returns {Promise<void>}
  */
 async function projectAllLayers() {
@@ -45,22 +44,68 @@ async function projectAllLayers() {
                 const dataStart = dataOffsetBase + info.data_offsets[0];
                 const byteLength = info.data_offsets[1] - info.data_offsets[0];
 
-                // 4. Extract exact slice
-                const buffer = Buffer.alloc(byteLength);
-                await fileHandle.read(buffer, 0, byteLength, dataStart);
+                const binPath = path.join(I7_DIR, `${key}.bin`);
+
+                // 4. Stream in aligned chunks of 6MB (divisible by 6 bytes for BF16 alignment)
+                const CHUNK_SIZE = 6 * 1024 * 1024;
                 
-                // Convert BF16 -> Float32 -> I7 Manifold
-                const f32Array = bf16ToFloat32Array(buffer);
-                const i7Buffer = quantizeToI7(f32Array);
+                // Pass 1: Scan chunk-by-chunk to find the absolute max value of the tensor
+                let maxVal = 0;
+                let bytesRead = 0;
+                while (bytesRead < byteLength) {
+                    const currentChunkSize = Math.min(CHUNK_SIZE, byteLength - bytesRead);
+                    const chunkBuffer = Buffer.alloc(currentChunkSize);
+                    await fileHandle.read(chunkBuffer, 0, currentChunkSize, dataStart + bytesRead);
+                    
+                    const numElements = currentChunkSize >> 1;
+                    const view = new DataView(chunkBuffer.buffer, chunkBuffer.byteOffset, chunkBuffer.byteLength);
+                    
+                    // Small local bitcast buffers
+                    const bitBuffer = new ArrayBuffer(4);
+                    const bitU32 = new Uint32Array(bitBuffer);
+                    const bitF32 = new Float32Array(bitBuffer);
+                    
+                    for (let i = 0; i < numElements; i++) {
+                        const bf16Bits = view.getUint16(i * 2, true);
+                        bitU32[0] = bf16Bits << 16;
+                        const val = Math.abs(bitF32[0]);
+                        if (val > maxVal) maxVal = val;
+                    }
+                    bytesRead += currentChunkSize;
+                }
+
+                // Pass 2: Stream chunk-by-chunk, scale, and write to disk
+                const writeStream = fs.createWriteStream(binPath);
                 
-                // Write to individual shard
-                await fsPromises.writeFile(path.join(I7_DIR, `${key}.bin`), i7Buffer);
+                // Write the Float32 scale factor in the first 4 bytes
+                const scaleBuf = Buffer.alloc(4);
+                scaleBuf.writeFloatLE(maxVal / 127.0, 0);
+                writeStream.write(scaleBuf);
+
+                bytesRead = 0;
+                while (bytesRead < byteLength) {
+                    const currentChunkSize = Math.min(CHUNK_SIZE, byteLength - bytesRead);
+                    const chunkBuffer = Buffer.alloc(currentChunkSize);
+                    await fileHandle.read(chunkBuffer, 0, currentChunkSize, dataStart + bytesRead);
+                    
+                    const rgbaBuffer = encodeBF16To5Cell8Bit(chunkBuffer, maxVal);
+                    writeStream.write(rgbaBuffer);
+                    
+                    bytesRead += currentChunkSize;
+                }
+
+                writeStream.end();
+                await new Promise((resolve) => writeStream.on('finish', resolve));
+                
+                // Free memory hints for large layers
+                if (global.gc) global.gc();
             }
 
             await fileHandle.close();
             console.log(`[Manifold] Projected shards for ${tensorName}`);
         } catch (e) {
-            console.error(`[Manifold] Failed projection for ${tensorName}: ${e.message}`);
+            const err = /** @type {any} */ (e);
+            console.error(`[Manifold] Failed projection for ${tensorName}: ${err.message || String(err)}`);
         }
     }
 }

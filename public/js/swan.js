@@ -1,5 +1,4 @@
 // @ts-check
-import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js';
 
 export const SwanStorage = {
     /**
@@ -12,16 +11,19 @@ export const SwanStorage = {
         const root = await navigator.storage.getDirectory();
         try {
             const handle = await root.getFileHandle(filename);
-            return await handle.getFile();
-        } catch {
-            const res = await fetch(url);
+            const file = await handle.getFile();
+            if (file.size > 0) return file;
+            // If size is 0, it means an incomplete download occurred. Fall through to fetch.
+        } catch {}
+
+        const res = await fetch(url);
+            if (!res.ok) throw new Error(`HTTP ${res.status}: Failed to fetch ${url}`);
             const blob = await res.blob();
             const handle = await root.getFileHandle(filename, { create: true });
             const writable = await handle.createWritable();
             await writable.write(blob);
             await writable.close();
             return await handle.getFile();
-        }
     }
 };
 

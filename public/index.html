@@ -4,10 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <!-- Eruda for mobile debugging -->
-    <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
+    <script src="/vendor/eruda.js"></script>
     <script>eruda.init();</script>
     <title>SWAN Engine</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/vendor/tailwindcss.js"></script>
     <style>
         body { -webkit-tap-highlight-color: transparent; }
         #terminal { height: calc(100vh - 200px); }
@@ -35,7 +35,8 @@
 
     <script type="module">
         import { SwanPipeline, SwanUI, SwanStorage } from './js/swan.js';
-        import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/transformers.min.js';
+        import { SwanMathEngine } from './js/swanMath.js';
+        import { env, AutoTokenizer } from './vendor/transformers.min.js';
 
         // SSE Log Integration
         const eventSource = new EventSource('/api/events');
@@ -66,19 +67,67 @@
         async function bootstrap() {
             try {
                 await SwanPipeline.ensureReady(SwanUI);
-                const tokenizer = await AutoTokenizer.from_pretrained('Xenova/Qwen1.5-0.5B');
+                
+                // Configure transformers to load only local files
+                env.allowRemoteModels = false;
+                env.allowLocalModels = false; // "local" means Node.js fs, we use URLs instead
+                const tokenizer = await AutoTokenizer.from_pretrained('/model/tokenizer/');
+                
                 SwanUI.log("Tokenizer & Pipeline ready.");
                 
+                const mathEngine = new SwanMathEngine(SwanUI);
+                await mathEngine.init();
+
+                await mathEngine.loadAllWeights((current, total) => {
+                    if (current % 4 === 0) {
+                        SwanUI.log(`Loading layer ${current}/${total}...`, "system");
+                    }
+                });
+
                 document.getElementById('run').onclick = async () => {
-                    // Using the specific path identified for the embed tokens
-                    const path = '/model/i7/model.embed_tokens.weight.bin';
-                    SwanUI.log(`Loading: ${path}`);
+                    const prompt = document.getElementById('prompt').value || "Hello, world!";
+                    SwanUI.log(`Tokenizing prompt: "${prompt}"`);
+                    const tokens = await tokenizer(prompt);
+                    const tokenIds = tokens.input_ids.data;
+                    SwanUI.log(`Tokens: [${tokenIds.join(', ')}]`);
+                    
+                    let generatedTokens = [];
+                    let maxTokens = 20;
                     
                     try {
-                        const file = await SwanStorage.getModelFile('embed.bin', path);
-                        SwanUI.log(`Shard Loaded: ${file.size} bytes`);
+                        SwanUI.log(`Processing prompt to build KV cache...`);
+                        let currentPos = 0;
+                        for (let i = 0; i < tokenIds.length - 1; i++) {
+                            await mathEngine.forward(Number(tokenIds[i]), currentPos);
+                            currentPos++;
+                        }
+                        
+                        let currentToken = Number(tokenIds[tokenIds.length - 1]);
+                        
+                        for (let step = 0; step < maxTokens; step++) {
+                            // Run the full WebGPU forward pass
+                            const bestToken = await mathEngine.forward(currentToken, currentPos);
+                            
+                            generatedTokens.push(bestToken);
+                            currentToken = bestToken;
+                            currentPos++;
+                            
+                            const decoded = await tokenizer.decode([bestToken]);
+                            SwanUI.log(`[Step ${step+1}] ID: ${bestToken} -> "${decoded}"`, "system");
+                            
+                            if (bestToken === 151643 || bestToken === 151645) {
+                                SwanUI.log("Generation finished (EOS token reached).", "system");
+                                break;
+                            }
+                            
+                            await new Promise(r => setTimeout(r, 1));
+                        }
+                        
+                        const fullDecoded = await tokenizer.decode(generatedTokens);
+                        SwanUI.log(`Final sequence: "${fullDecoded}"`);
+                        
                     } catch (err) {
-                        SwanUI.log(`Fetch Error: ${err.message}`, 'error');
+                        SwanUI.log(`Inference Error: ${err.message}`, 'error');
                     }
                 };
             } catch (e) {
